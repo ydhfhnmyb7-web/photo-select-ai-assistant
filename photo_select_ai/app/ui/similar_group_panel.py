@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from app.analyzers.similarity_analyzer import build_similarity_summary, set_group_status
 from app.core.mvp_models import PhotoItem
+from app.ui.dual_compare_dialog import DualCompareDialog
 
 
 STATUS_LABELS = {
@@ -54,7 +55,14 @@ class SimilarGroupPanel(QWidget):
         self.stats_label = QLabel("相似组：0 组｜组内照片：0 张｜人工最佳：0 张｜重复淘汰：0 张｜待复核：0 张")
         self.stats_label.setWordWrap(True)
         self.stats_label.setStyleSheet("font-weight: 700; color: #e5edf7; padding: 4px 2px;")
-        root.addWidget(self.stats_label)
+        stats_row = QHBoxLayout()
+        stats_row.addWidget(self.stats_label, 1)
+        self.dual_compare_button = QPushButton("双图对比")
+        self.dual_compare_button.setMinimumHeight(34)
+        self.dual_compare_button.setToolTip("在当前相似组内打开左右大图对比，便于判断组内最佳。")
+        self.dual_compare_button.clicked.connect(self._open_dual_compare_current_group)
+        stats_row.addWidget(self.dual_compare_button)
+        root.addLayout(stats_row)
 
         self.empty_hint = QLabel("当前还没有相似组。请先运行后台任务：计算相似照片。")
         self.empty_hint.setWordWrap(True)
@@ -110,6 +118,7 @@ class SimilarGroupPanel(QWidget):
         self.empty_hint.setVisible(not has_groups)
         self.run_similarity_button.setVisible(not has_groups)
         self._refresh_group_list(summary["groups"])
+        self.dual_compare_button.setEnabled(len(self._group_items(self.current_group_id)) >= 2)
         self._refresh_group_grid()
 
     def _refresh_group_list(self, groups: list[dict]) -> None:
@@ -241,6 +250,11 @@ class SimilarGroupPanel(QWidget):
         open_button.setMinimumHeight(32)
         open_button.clicked.connect(lambda _checked=False, photo=item: self._open_large_preview(photo))
         button_row.addWidget(open_button)
+        compare_button = QPushButton("对比")
+        compare_button.setMinimumHeight(32)
+        compare_button.setToolTip("与同组另一张照片做左右大图对比。")
+        compare_button.clicked.connect(lambda _checked=False, photo=item: self._open_dual_compare(photo))
+        button_row.addWidget(compare_button)
         layout.addLayout(button_row)
         return card
 
@@ -269,6 +283,54 @@ class SimilarGroupPanel(QWidget):
         self.highlight_source_index = self.items.index(item)
         self.group_status_changed.emit(changed, self.highlight_source_index)
         self.refresh()
+
+    def _open_dual_compare_current_group(self) -> None:
+        group_items = self._sorted_group_items(self.current_group_id)
+        if len(group_items) < 2:
+            return
+        self._open_dual_compare(self._preferred_left_item(group_items))
+
+    def _open_dual_compare(self, item: PhotoItem) -> None:
+        partner = self._comparison_partner(item)
+        if partner is None:
+            return
+        dialog = DualCompareDialog(self.items, self.items.index(item), self.items.index(partner), self)
+        dialog.group_status_changed.connect(self._on_dual_compare_status_changed)
+        dialog.exec()
+        self.refresh()
+
+    def _on_dual_compare_status_changed(self, changed: list[PhotoItem], source_index: int) -> None:
+        self.highlight_source_index = source_index
+        self.group_status_changed.emit(changed, source_index)
+        self.refresh()
+
+    def _preferred_left_item(self, group_items: list[PhotoItem]) -> PhotoItem:
+        if 0 <= self.highlight_source_index < len(self.items):
+            highlighted = self.items[self.highlight_source_index]
+            if highlighted in group_items:
+                return highlighted
+        for candidate in group_items:
+            if candidate.best_in_group:
+                return candidate
+        for candidate in group_items:
+            if candidate.ai_recommended_best:
+                return candidate
+        return group_items[0]
+
+    def _comparison_partner(self, item: PhotoItem) -> PhotoItem | None:
+        group_items = self._sorted_group_items(item.similar_group_id)
+        if len(group_items) < 2:
+            return None
+        for candidate in group_items:
+            if candidate.path != item.path and (candidate.best_in_group or candidate.ai_recommended_best):
+                return candidate
+        position = next((index for index, candidate in enumerate(group_items) if candidate.path == item.path), 0)
+        if position + 1 < len(group_items):
+            return group_items[position + 1]
+        return group_items[position - 1] if position > 0 else None
+
+    def _sorted_group_items(self, group_id: str) -> list[PhotoItem]:
+        return sorted(self._group_items(group_id), key=lambda p: (p.similar_group_rank or 999, p.filename))
 
     def _open_large_preview(self, item: PhotoItem) -> None:
         dialog = QDialog(self)

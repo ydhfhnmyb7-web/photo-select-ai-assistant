@@ -341,11 +341,17 @@ def set_group_status(items: list[PhotoItem], target: PhotoItem, status: str) -> 
             elif item.similar_group_status not in {"duplicate", "rejected"} and item.review_status != REVIEW_STATUS_HUMAN_CONFIRMED:
                 item.similar_group_status = item.similar_group_status or "backup"
     elif status == "backup":
+        target.best_in_group = False
+        target.recommended_keep = False
+        target.recommended_in_group = False
         target.similar_group_status = "backup"
         target.review_status = REVIEW_STATUS_HUMAN_CONFIRMED
         if not target.quality_rating:
             target.quality_rating = "B"
     elif status == "duplicate":
+        target.best_in_group = False
+        target.recommended_keep = False
+        target.recommended_in_group = False
         target.similar_group_status = "duplicate"
         target.review_status = REVIEW_STATUS_HUMAN_CONFIRMED
         if "重复照片" not in target.issue_tags:
@@ -355,6 +361,9 @@ def set_group_status(items: list[PhotoItem], target: PhotoItem, status: str) -> 
         if not target.quality_rating:
             target.quality_rating = "C"
     elif status == "review":
+        target.best_in_group = False
+        target.recommended_keep = False
+        target.recommended_in_group = False
         target.similar_group_status = "review"
         target.review_status = REVIEW_STATUS_NEEDS_REVIEW
     target.human_group_decision = json.dumps(
