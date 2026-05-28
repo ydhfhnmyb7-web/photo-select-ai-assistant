@@ -1,0 +1,86 @@
+{
+  "use_gpu": true,
+  "batch_size": 6,
+  "confidence_threshold": 0.58,
+  "thumbnail_size": 180,
+  "thumbnail_mode": "contain",
+  "preview_max_size": 1600,
+  "export_mode": "copy",
+  "enable_ai": true,
+  "enable_similarity": true,
+  "theme": "dark_preview",
+  "max_compare_images": 4,
+  "max_image_size": 1024,
+  "use_fp16": true,
+  "import_batch_size": 40,
+  "similarity_hamming_threshold": 6,
+  "use_clip": true,
+  "autosave_interval_seconds": 60,
+  "ask_save_on_exit": true,
+  "restore_last_project": true,
+  "target_pick_ratio": 0.15,
+  "max_pending_ratio": 0.25,
+  "min_keep_per_group": 1,
+  "max_keep_per_group": 3,
+  "prefer_relative_ranking": true,
+  "screening_strategy": "delivery",
+  "num_workers": 4,
+  "prefetch": true,
+  "pin_memory": true,
+  "model_profile": "ultra",
+  "semantic_model": "openclip_vit_h_14",
+  "detector_model": "yolo11x",
+  "model_cache_dir": "models/cache",
+  "auto_download_models": false,
+  "allow_large_model_download": true,
+  "scoring_weights": {
+    "delivery": {
+      "visual_quality": 0.35,
+      "semantic": 0.25,
+      "relative": 0.25,
+      "preference": 0.15
+    },
+    "learned": {
+      "visual_quality": 0.25,
+      "semantic": 0.2,
+      "relative": 0.2,
+      "preference": 0.35
+    },
+    "portfolio": {
+      "visual_quality": 0.3,
+      "semantic": 0.3,
+      "relative": 0.25,
+      "preference": 0.15
+    },
+    "conservative": {
+      "visual_quality": 0.3,
+      "semantic": 0.25,
+      "relative": 0.2,
+      "preference": 0.25
+    },
+    "strict": {
+      "visual_quality": 0.4,
+      "semantic": 0.25,
+      "relative": 0.25,
+      "preference": 0.1
+    }
+  },
+  "enable_idle_tasks": false,
+  "enable_idle_self_test": false,
+  "enable_idle_embedding": false,
+  "enable_idle_similarity": true,
+  "enable_idle_preference_training": false,
+  "aesthetic_library_folders": [],
+  "background_task_start_mode": "manual",
+  "background_task_enabled_types": [
+    "thumbnail_cache",
+    "similar_photos",
+    "ai_preclassify",
+    "face_quality",
+    "pose_analysis",
+    "expression_analysis",
+    "preference_stats",
+    "export_preview"
+  ],
+  "similarity_mode": "standard"
+}

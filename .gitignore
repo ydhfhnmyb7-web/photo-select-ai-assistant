@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Logs
+logs/
+*.log
+
+# Cache / temp
+cache/
+.cache/
+_tmp_*/
+tmp/
+temp/
+*_tmp_*
+
+# Test exports / workflow outputs
+_real_workflow_export/
+_real_workflow_*/
+PhotoSelect_Output*/
+photo_select_ai/_real_workflow_export/
+photo_select_ai/_real_workflow_*/
+
+# Models / large AI files
+models/
+*.onnx
+*.pt
+*.pth
+*.safetensors
+
+# Local databases / generated project data
+*.db
+*.sqlite
+*.sqlite3
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build
+build/
+dist/
+*.spec
+# Runtime user data
+photo_select_ai/data/project_state.json
+photo_select_ai/data/user_preference_samples.jsonl
