@@ -100,6 +100,17 @@ class PhotoRepository:
         "human_group_decision": "TEXT DEFAULT ''",
         "similarity_hash": "TEXT DEFAULT ''",
         "similarity_hash_mtime": "REAL DEFAULT 0",
+        "auto_group_id": "TEXT DEFAULT ''",
+        "auto_group_confidence": "REAL DEFAULT 0",
+        "auto_group_reason": "TEXT DEFAULT ''",
+        "embedding_model_name": "TEXT DEFAULT ''",
+        "embedding_cached_at": "TEXT DEFAULT ''",
+        "grouping_method": "TEXT DEFAULT ''",
+        "embedding_cache_key": "TEXT DEFAULT ''",
+        "embedding_dim": "INTEGER DEFAULT 0",
+        "embedding_version": "TEXT DEFAULT ''",
+        "auto_group_rank": "INTEGER DEFAULT 0",
+        "auto_group_size": "INTEGER DEFAULT 0",
         "updated_at": "TEXT DEFAULT CURRENT_TIMESTAMP",
     }
 

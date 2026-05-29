@@ -140,6 +140,17 @@ class PhotoItem:
     human_group_decision: str = ""
     similarity_hash: str = ""
     similarity_hash_mtime: float = 0.0
+    auto_group_id: str = ""
+    auto_group_confidence: float = 0.0
+    auto_group_reason: str = ""
+    embedding_model_name: str = ""
+    embedding_cached_at: str = ""
+    grouping_method: str = ""
+    embedding_cache_key: str = ""
+    embedding_dim: int = 0
+    embedding_version: str = ""
+    auto_group_rank: int = 0
+    auto_group_size: int = 0
 
     @property
     def label(self) -> str:
@@ -283,4 +294,15 @@ class PhotoItem:
             "human_group_decision": self.human_group_decision,
             "similarity_hash": self.similarity_hash,
             "similarity_hash_mtime": self.similarity_hash_mtime,
+            "auto_group_id": self.auto_group_id,
+            "auto_group_confidence": self.auto_group_confidence,
+            "auto_group_reason": self.auto_group_reason,
+            "embedding_model_name": self.embedding_model_name,
+            "embedding_cached_at": self.embedding_cached_at,
+            "grouping_method": self.grouping_method,
+            "embedding_cache_key": self.embedding_cache_key,
+            "embedding_dim": self.embedding_dim,
+            "embedding_version": self.embedding_version,
+            "auto_group_rank": self.auto_group_rank,
+            "auto_group_size": self.auto_group_size,
         }

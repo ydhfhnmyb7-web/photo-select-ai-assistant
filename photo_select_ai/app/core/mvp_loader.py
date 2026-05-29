@@ -187,6 +187,17 @@ def build_photo_item(image_path: Path, thumbnail_dir: Path, saved: dict, config:
         human_group_decision=saved.get("human_group_decision") or "",
         similarity_hash=saved.get("similarity_hash") or "",
         similarity_hash_mtime=float(saved.get("similarity_hash_mtime") or 0.0),
+        auto_group_id=saved.get("auto_group_id") or "",
+        auto_group_confidence=float(saved.get("auto_group_confidence") or 0.0),
+        auto_group_reason=saved.get("auto_group_reason") or "",
+        embedding_model_name=saved.get("embedding_model_name") or "",
+        embedding_cached_at=saved.get("embedding_cached_at") or "",
+        grouping_method=saved.get("grouping_method") or "",
+        embedding_cache_key=saved.get("embedding_cache_key") or "",
+        embedding_dim=int(saved.get("embedding_dim") or 0),
+        embedding_version=saved.get("embedding_version") or "",
+        auto_group_rank=int(saved.get("auto_group_rank") or 0),
+        auto_group_size=int(saved.get("auto_group_size") or 0),
     )
     item.compute_final_category(config.confidence_threshold)
     return item
