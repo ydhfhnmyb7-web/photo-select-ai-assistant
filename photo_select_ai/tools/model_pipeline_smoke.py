@@ -16,6 +16,13 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--similarity-threshold", type=float, default=0.86)
     parser.add_argument(
+        "--grouping-strategy",
+        choices=["connected_components", "complete_linkage", "average_linkage", "sequence_constrained"],
+        default="complete_linkage",
+    )
+    parser.add_argument("--group-min-similarity", type=float, default=0.92)
+    parser.add_argument("--max-group-size", type=int, default=25)
+    parser.add_argument(
         "--threshold-sweep",
         default="",
         help="Comma-separated thresholds, e.g. 0.78,0.82,0.86,0.90,0.94",
@@ -36,6 +43,9 @@ def main() -> int:
         max_photos=args.max_photos or None,
         thresholds=parse_thresholds(args.threshold_sweep) or None,
         manual_groups_csv=Path(args.manual_groups_csv) if args.manual_groups_csv else None,
+        grouping_strategy=args.grouping_strategy,
+        group_min_similarity_threshold=args.group_min_similarity,
+        max_group_size=args.max_group_size,
     )
     print(result_to_json(result))
     return 0

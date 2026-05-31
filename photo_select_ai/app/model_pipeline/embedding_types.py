@@ -45,6 +45,10 @@ class EmbeddingGroup:
     representative_index: int
     average_similarity: float
     method: str
+    min_similarity: float = 0.0
+    max_similarity: float = 0.0
+    high_risk_overmerge: bool = False
+    grouping_strategy: str = "connected_components"
 
 
 @dataclass

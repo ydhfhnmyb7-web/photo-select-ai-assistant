@@ -66,6 +66,9 @@ class AppConfig:
     embedding_similarity_threshold: float = 0.86
     embedding_group_min_size: int = 2
     grouping_method: str = "embedding"
+    grouping_strategy: str = "complete_linkage"
+    group_min_similarity_threshold: float = 0.92
+    max_embedding_group_size: int = 25
 
 
 def load_config() -> AppConfig:
@@ -114,6 +117,15 @@ def load_config() -> AppConfig:
     config.embedding_group_min_size = max(2, int(config.embedding_group_min_size))
     if config.grouping_method not in {"embedding", "embedding_openclip", "ahash_fallback", "mock_embedding"}:
         config.grouping_method = "embedding"
+    if config.grouping_strategy not in {
+        "connected_components",
+        "complete_linkage",
+        "average_linkage",
+        "sequence_constrained",
+    }:
+        config.grouping_strategy = "complete_linkage"
+    config.group_min_similarity_threshold = max(0.01, min(0.99, float(config.group_min_similarity_threshold)))
+    config.max_embedding_group_size = max(2, int(config.max_embedding_group_size))
     config.batch_size = _profile_batch_size(config.model_profile, config.batch_size)
     defaults = default_scoring_weights()
     if not isinstance(config.scoring_weights, dict):

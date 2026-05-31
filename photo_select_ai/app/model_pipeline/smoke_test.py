@@ -52,6 +52,7 @@ class SmokeGroupDetail:
     average_confidence: float = 0.0
     low_confidence: bool = False
     suspected_over_merged: bool = False
+    high_risk_overmerge: bool = False
 
     @property
     def size(self) -> int:
@@ -66,6 +67,8 @@ class ThresholdSweepResult:
     singleton_count: int
     average_group_size: float
     low_confidence_group_count: int
+    high_risk_group_count: int = 0
+    worst_group_min_similarity: float = 0.0
     groups: list[SmokeGroupDetail] = field(default_factory=list)
     ungrouped_files: list[str] = field(default_factory=list)
     low_confidence_groups: list[str] = field(default_factory=list)
@@ -101,6 +104,9 @@ def run_model_pipeline_smoke(
     max_photos: int | None = None,
     thresholds: Sequence[float] | None = None,
     manual_groups_csv: Path | str | None = None,
+    grouping_strategy: str = "complete_linkage",
+    group_min_similarity_threshold: float = 0.92,
+    max_group_size: int = 25,
 ) -> SmokeTestResult:
     input_path = Path(input_dir)
     output_path = Path(output_report) if output_report else input_path / "model_pipeline_smoke_report.md"
@@ -112,6 +118,9 @@ def run_model_pipeline_smoke(
         embedding_batch_size=batch_size,
         batch_size=batch_size,
         embedding_similarity_threshold=similarity_threshold,
+        grouping_strategy=grouping_strategy,
+        group_min_similarity_threshold=group_min_similarity_threshold,
+        max_embedding_group_size=max_group_size,
     )
     runtime = detect_model_runtime(config.use_gpu)
     extractor, openclip_reasons = _build_smoke_extractor(config, runtime)
@@ -145,6 +154,9 @@ def run_model_pipeline_smoke(
         method=pipeline.method,
         thresholds=sweep_thresholds,
         manual_groups=manual_groups,
+        grouping_strategy=config.grouping_strategy,
+        group_min_similarity_threshold=config.group_min_similarity_threshold,
+        max_group_size=config.max_embedding_group_size,
     )
     recommended_threshold, recommended_reason = recommend_threshold(threshold_results, bool(manual_groups))
 
@@ -227,12 +239,23 @@ def build_threshold_sweep(
     method: str,
     thresholds: Sequence[float],
     manual_groups: dict[str, str] | None = None,
+    grouping_strategy: str = "complete_linkage",
+    group_min_similarity_threshold: float = 0.92,
+    max_group_size: int = 25,
 ) -> list[ThresholdSweepResult]:
     manual_groups = manual_groups or {}
     results: list[ThresholdSweepResult] = []
     embedding_map = _embedding_map(embeddings)
     for threshold in _normalize_thresholds(thresholds):
-        grouping = group_embeddings(items, embeddings, threshold=threshold, method=method)
+        grouping = group_embeddings(
+            items,
+            embeddings,
+            threshold=threshold,
+            method=method,
+            grouping_strategy=grouping_strategy,
+            group_min_similarity_threshold=group_min_similarity_threshold,
+            max_group_size=max_group_size,
+        )
         result = build_threshold_result(items, grouping, embedding_map, threshold, manual_groups)
         results.append(result)
     return results
@@ -253,13 +276,15 @@ def build_threshold_result(
 
     groups: list[SmokeGroupDetail] = []
     grouped_files: set[str] = set()
+    grouping_group_by_id = {group.group_id: group for group in grouping.groups}
     for group_id, group_items in sorted(grouped_by_id.items()):
         files = [item.filename for item in group_items]
         grouped_files.update(files)
+        grouping_group = grouping_group_by_id.get(group_id)
         similarities = _pair_similarities(group_items, embedding_map)
-        average_similarity = _average(similarities)
-        min_similarity = min(similarities) if similarities else 0.0
-        max_similarity = max(similarities) if similarities else 0.0
+        average_similarity = grouping_group.average_similarity if grouping_group else _average(similarities)
+        min_similarity = grouping_group.min_similarity if grouping_group else (min(similarities) if similarities else 0.0)
+        max_similarity = grouping_group.max_similarity if grouping_group else (max(similarities) if similarities else 0.0)
         confidences = [
             grouping.assignments.get(Path(item.path)).auto_group_confidence
             for item in group_items
@@ -269,6 +294,7 @@ def build_threshold_result(
         manual_labels = {manual_groups.get(file_name, "") for file_name in files if manual_groups.get(file_name, "")}
         suspected_over_merged = (
             len(manual_labels) > 1
+            or bool(grouping_group and grouping_group.high_risk_overmerge)
             or len(files) >= max(8, int(len(items) * 0.35) if items else 8)
             or (len(files) > 2 and min_similarity < max(0.0, threshold - 0.06))
         )
@@ -285,6 +311,7 @@ def build_threshold_result(
                 average_confidence=round(average_confidence, 4),
                 low_confidence=low_confidence,
                 suspected_over_merged=suspected_over_merged,
+                high_risk_overmerge=bool(grouping_group and grouping_group.high_risk_overmerge),
             )
         )
 
@@ -300,6 +327,8 @@ def build_threshold_result(
         singleton_count=singleton_count,
         average_group_size=round(_average(group_sizes), 2),
         low_confidence_group_count=sum(1 for group in groups if group.low_confidence),
+        high_risk_group_count=sum(1 for group in groups if group.high_risk_overmerge),
+        worst_group_min_similarity=round(min((group.min_similarity for group in groups), default=0.0), 4),
         groups=groups,
         ungrouped_files=ungrouped_files,
         low_confidence_groups=[group.group_id for group in groups if group.low_confidence],
@@ -451,6 +480,9 @@ def write_smoke_markdown(
         f"- backend 请求：`{config.embedding_backend}`",
         f"- backend 实际：`{_backend_label(pipeline.method)}`",
         f"- grouping_method：`{pipeline.method}`",
+        f"- grouping_strategy：`{config.grouping_strategy}`",
+        f"- group_min_similarity_threshold：`{config.group_min_similarity_threshold}`",
+        f"- max_group_size：`{config.max_embedding_group_size}`",
         f"- device 实际：`{_device_label(extractor, runtime)}`",
         f"- embedding_model_name：`{extractor.model_name}`",
         f"- embedding_dim：`{_embedding_dim(items)}`",
@@ -483,8 +515,8 @@ def write_smoke_markdown(
 
     lines.extend(["", "## Threshold Summary", ""])
     header = [
-        "| threshold | groups | max group | singletons | avg group | low confidence | over merge? | near split hints | precision | recall | F1 |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| threshold | groups | max group | singletons | avg group | worst min sim | low confidence | high risk | over merge? | near split hints | precision | recall | F1 |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     lines.extend(header)
     for result in threshold_results:
@@ -497,7 +529,8 @@ def write_smoke_markdown(
         lines.append(
             f"| {result.threshold:.2f} | {result.group_count} | {result.max_group_size} | "
             f"{result.singleton_count} | {result.average_group_size:.2f} | "
-            f"{result.low_confidence_group_count} | {len(result.suspected_over_merged_groups)} | "
+            f"{result.worst_group_min_similarity:.4f} | {result.low_confidence_group_count} | "
+            f"{result.high_risk_group_count} | {len(result.suspected_over_merged_groups)} | "
             f"{len(result.near_miss_pairs)} | {precision_text} | {recall_text} | {f1_text} |"
         )
 
@@ -509,6 +542,8 @@ def write_smoke_markdown(
             flags = []
             if group.low_confidence:
                 flags.append("低置信度")
+            if group.high_risk_overmerge:
+                flags.append("高风险过度合并")
             if group.suspected_over_merged:
                 flags.append("疑似过度合并")
             flag_text = f"（{' / '.join(flags)}）" if flags else ""
@@ -742,7 +777,9 @@ def result_to_json(result: SmokeTestResult) -> str:
                     "group_count": threshold.group_count,
                     "max_group_size": threshold.max_group_size,
                     "singleton_count": threshold.singleton_count,
+                    "worst_group_min_similarity": threshold.worst_group_min_similarity,
                     "low_confidence_group_count": threshold.low_confidence_group_count,
+                    "high_risk_group_count": threshold.high_risk_group_count,
                     "pair_f1": threshold.evaluation.pair_f1 if threshold.evaluation else None,
                 }
                 for threshold in result.threshold_results

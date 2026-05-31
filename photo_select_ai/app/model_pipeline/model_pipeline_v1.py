@@ -113,7 +113,15 @@ def run_model_pipeline_v1(
         if progress_callback:
             progress_callback(total * 2, max(1, total * 2), "embedding 分组")
 
-    grouping = group_embeddings(items, embeddings, threshold=threshold, method=extractor.method)
+    grouping = group_embeddings(
+        items,
+        embeddings,
+        threshold=threshold,
+        method=extractor.method,
+        grouping_strategy=config.grouping_strategy,
+        group_min_similarity_threshold=config.group_min_similarity_threshold,
+        max_group_size=config.max_embedding_group_size,
+    )
     apply_auto_group_assignments(items, grouping)
     for item in items:
         if item.embedding_model_name:
