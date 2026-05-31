@@ -42,6 +42,14 @@ class OpenClipEmbeddingExtractor(EmbeddingExtractor):
         self.batch_size = max(1, int(getattr(self.config, "embedding_batch_size", 0) or self.config.batch_size))
         self._initialize()
 
+    @property
+    def device_label(self) -> str:
+        return str(self._device)
+
+    @property
+    def use_fp16(self) -> bool:
+        return self._use_fp16
+
     def extract_batch(self, image_paths: list[Path]) -> list[EmbeddingResult]:
         if not image_paths:
             return []
@@ -131,3 +139,33 @@ def _openclip_model_id(config: AppConfig) -> str:
     if configured.startswith("openclip_"):
         return configured
     return str(config.semantic_model)
+
+
+def diagnose_openclip_availability(config: AppConfig | None = None) -> list[str]:
+    config = config or load_config()
+    reasons: list[str] = []
+    if find_spec("torch") is None:
+        reasons.append("torch 缺失")
+    else:
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                reasons.append("CUDA 不可用")
+        except Exception as exc:
+            reasons.append(f"torch 检测失败：{exc}")
+    if find_spec("open_clip") is None:
+        reasons.append("open_clip 缺失")
+    try:
+        manager = ModelManager(config)
+        spec = get_openclip_spec(_openclip_model_id(config), config.model_profile)
+        marker = manager.semantic_marker(spec)
+        if not marker.exists():
+            reasons.append(f"模型 marker 不存在：{marker}")
+        cache_dir = manager.semantic_cache_dir(spec)
+        weight_suffixes = {".bin", ".pt", ".pth", ".safetensors"}
+        if not any(path.is_file() and path.suffix.lower() in weight_suffixes for path in cache_dir.rglob("*")):
+            reasons.append(f"模型权重不存在或未完整缓存：{cache_dir}")
+    except Exception as exc:
+        reasons.append(f"模型目录检测失败：{exc}")
+    return reasons

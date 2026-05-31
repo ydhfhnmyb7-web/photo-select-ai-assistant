@@ -100,6 +100,22 @@ class EmbeddingCache:
         embedding.dim = len(embedding.vector)
         return embedding
 
+    def delete(
+        self,
+        image_path: Path | str,
+        model_name: str,
+        model_version: str,
+        preprocess_version: str = "v1",
+    ) -> None:
+        key = self.cache_key(image_path, model_name, model_version, preprocess_version)
+        vector_path, meta_path = self._paths_for_key(model_name, key)
+        for path in [vector_path, meta_path]:
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                continue
+
     def _paths_for_key(self, model_name: str, key: str) -> tuple[Path, Path]:
         model_dir = self.root / _safe_segment(model_name)
         return model_dir / f"{key}.npy", model_dir / f"{key}.json"
