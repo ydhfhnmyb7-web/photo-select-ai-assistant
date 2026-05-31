@@ -59,8 +59,10 @@ class AppConfig:
     similarity_mode: str = "standard"
     enable_embedding_grouping: bool = True
     embedding_backend: str = "auto"
-    embedding_model_name: str = "ahash_color_fallback"
+    embedding_model_name: str = "openclip_vit_l_14"
     embedding_model_version: str = "v1"
+    embedding_device: str = "auto"
+    embedding_batch_size: int = 16
     embedding_similarity_threshold: float = 0.86
     embedding_group_min_size: int = 2
     grouping_method: str = "embedding"
@@ -103,11 +105,14 @@ def load_config() -> AppConfig:
         config.background_task_enabled_types = ["thumbnail_cache", "similar_photos", "export_preview"]
     if config.similarity_mode not in {"strict", "standard", "loose"}:
         config.similarity_mode = "standard"
-    if config.embedding_backend not in {"auto", "torch", "onnx", "mock", "fallback"}:
+    if config.embedding_backend not in {"auto", "openclip", "torch", "onnx", "mock", "fallback"}:
         config.embedding_backend = "auto"
+    if config.embedding_device not in {"auto", "cuda", "cpu"}:
+        config.embedding_device = "auto"
+    config.embedding_batch_size = max(1, int(config.embedding_batch_size))
     config.embedding_similarity_threshold = max(0.01, min(0.99, float(config.embedding_similarity_threshold)))
     config.embedding_group_min_size = max(2, int(config.embedding_group_min_size))
-    if config.grouping_method not in {"embedding", "ahash_fallback", "mock_embedding"}:
+    if config.grouping_method not in {"embedding", "embedding_openclip", "ahash_fallback", "mock_embedding"}:
         config.grouping_method = "embedding"
     config.batch_size = _profile_batch_size(config.model_profile, config.batch_size)
     defaults = default_scoring_weights()

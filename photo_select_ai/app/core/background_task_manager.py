@@ -18,6 +18,7 @@ from app.export.report_generator import build_export_summary
 
 TASK_THUMBNAIL_CACHE = "thumbnail_cache"
 TASK_SIMILAR_PHOTOS = "similar_photos"
+TASK_MODEL_AUTO_GROUP = "model_auto_group"
 TASK_AI_PRECLASSIFY = "ai_preclassify"
 TASK_FACE_QUALITY = "face_quality"
 TASK_POSE_ANALYSIS = "pose_analysis"
@@ -29,6 +30,7 @@ TASK_EXPORT = "export"
 TASK_NAMES = {
     TASK_THUMBNAIL_CACHE: "生成缩略图缓存",
     TASK_SIMILAR_PHOTOS: "计算相似照片",
+    TASK_MODEL_AUTO_GROUP: "模型自动分组 v1",
     TASK_AI_PRECLASSIFY: "AI预分类",
     TASK_FACE_QUALITY: "人脸质量分析",
     TASK_POSE_ANALYSIS: "肢体姿态分析",
@@ -189,6 +191,8 @@ class BackgroundTaskWorker(QObject):
             return self._run_preference_stats
         if task_type == TASK_SIMILAR_PHOTOS:
             return self._run_similarity_task
+        if task_type == TASK_MODEL_AUTO_GROUP:
+            return self._run_model_auto_group_task
         if task_type in {TASK_AI_PRECLASSIFY, TASK_FACE_QUALITY, TASK_POSE_ANALYSIS, TASK_EXPRESSION_ANALYSIS}:
             return self._run_analyzer_pipeline
         return self._run_placeholder_task
@@ -298,6 +302,41 @@ class BackgroundTaskWorker(QObject):
         task.failed_count = 0
         task.current_file = f"生成 {len(result.groups)} 个相似组"
         task.error_message = f"相似组 {len(result.groups)}，阈值 {result.threshold}，跳过 {len(result.skipped)} 张"
+        self.task_progress.emit(task)
+        self.queue_changed.emit(self.tasks)
+
+    def _run_model_auto_group_task(self, task: BackgroundTask) -> None:
+        from app.model_pipeline.model_pipeline_v1 import run_model_pipeline_v1
+
+        def progress(done: int, total: int, filename: str) -> None:
+            self._wait_if_paused(task)
+            task.total_count = max(task.total_count, total)
+            task.completed_count = min(done, task.total_count)
+            task.current_file = filename
+            self.task_progress.emit(task)
+            self.queue_changed.emit(self.tasks)
+
+        result = run_model_pipeline_v1(
+            self.items,
+            config=self.config,
+            progress_callback=progress,
+            cancel_callback=lambda: self._stop_requested,
+        )
+        if task.status == TASK_STATUS_STOPPED:
+            return
+        grouped_count = sum(1 for item in self.items if item.auto_group_id)
+        fallback_count = len(result.embeddings) if result.method == "ahash_fallback" else 0
+        task.total_count = len(self.items)
+        task.completed_count = len(self.items)
+        task.success_count = len(result.embeddings)
+        task.skipped_count = len(result.skipped)
+        task.failed_count = 0
+        task.current_file = f"模型自动分组 {len(result.grouping.groups)} 组"
+        task.error_message = (
+            f"已分析 {len(result.embeddings)}/{len(self.items)}，"
+            f"入组 {grouped_count}，分组 {len(result.grouping.groups)}，"
+            f"fallback {fallback_count}，cache hit {result.cache_hits}，跳过 {len(result.skipped)}"
+        )
         self.task_progress.emit(task)
         self.queue_changed.emit(self.tasks)
 
