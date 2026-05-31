@@ -3,15 +3,20 @@ from __future__ import annotations
 import csv
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from itertools import combinations
 from pathlib import Path
+from typing import Sequence
 
+import numpy as np
 from PIL import Image, ImageOps
 
 from app.core.config import AppConfig
 from app.core.mvp_models import PhotoItem
 from app.model_pipeline.embedding_cache import EmbeddingCache
 from app.model_pipeline.embedding_extractor import EmbeddingExtractor, FallbackEmbeddingExtractor, MockEmbeddingExtractor
+from app.model_pipeline.embedding_grouping import group_embeddings
+from app.model_pipeline.embedding_types import EmbeddingGroupingResult, EmbeddingResult
 from app.model_pipeline.model_pipeline_v1 import ModelPipelineResult, run_model_pipeline_v1
 from app.model_pipeline.openclip_extractor import (
     OpenClipEmbeddingExtractor,
@@ -22,6 +27,51 @@ from app.model_pipeline.runtime_detector import RuntimeInfo, detect_model_runtim
 
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+LOW_CONFIDENCE_GROUP_THRESHOLD = 0.74
+
+
+@dataclass
+class PairEvaluation:
+    pair_precision: float = 0.0
+    pair_recall: float = 0.0
+    pair_f1: float = 0.0
+    true_positive_pairs: int = 0
+    false_positive_pairs: int = 0
+    false_negative_pairs: int = 0
+    over_merge_count: int = 0
+    over_split_count: int = 0
+
+
+@dataclass
+class SmokeGroupDetail:
+    group_id: str
+    files: list[str]
+    average_similarity: float = 0.0
+    min_similarity: float = 0.0
+    max_similarity: float = 0.0
+    average_confidence: float = 0.0
+    low_confidence: bool = False
+    suspected_over_merged: bool = False
+
+    @property
+    def size(self) -> int:
+        return len(self.files)
+
+
+@dataclass
+class ThresholdSweepResult:
+    threshold: float
+    group_count: int
+    max_group_size: int
+    singleton_count: int
+    average_group_size: float
+    low_confidence_group_count: int
+    groups: list[SmokeGroupDetail] = field(default_factory=list)
+    ungrouped_files: list[str] = field(default_factory=list)
+    low_confidence_groups: list[str] = field(default_factory=list)
+    suspected_over_merged_groups: list[str] = field(default_factory=list)
+    near_miss_pairs: list[tuple[str, str, float]] = field(default_factory=list)
+    evaluation: PairEvaluation | None = None
 
 
 @dataclass
@@ -35,6 +85,10 @@ class SmokeTestResult:
     openclip_reasons: list[str]
     pipeline: ModelPipelineResult
     photo_count: int
+    threshold_results: list[ThresholdSweepResult] = field(default_factory=list)
+    recommended_threshold: float = 0.0
+    recommended_reason: str = ""
+    manual_groups_path: Path | None = None
 
 
 def run_model_pipeline_smoke(
@@ -45,6 +99,8 @@ def run_model_pipeline_smoke(
     force_refresh_cache: bool = False,
     output_report: Path | str | None = None,
     max_photos: int | None = None,
+    thresholds: Sequence[float] | None = None,
+    manual_groups_csv: Path | str | None = None,
 ) -> SmokeTestResult:
     input_path = Path(input_dir)
     output_path = Path(output_report) if output_report else input_path / "model_pipeline_smoke_report.md"
@@ -81,8 +137,32 @@ def run_model_pipeline_smoke(
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     pipeline.elapsed_ms = elapsed_ms
 
-    write_smoke_markdown(output_path, input_path, config, runtime, extractor, openclip_reasons, items, pipeline)
-    write_smoke_csv(csv_path, items)
+    manual_groups = load_manual_groups_csv(manual_groups_csv) if manual_groups_csv else {}
+    sweep_thresholds = _normalize_thresholds(thresholds or [similarity_threshold])
+    threshold_results = build_threshold_sweep(
+        items=items,
+        embeddings=pipeline.embeddings,
+        method=pipeline.method,
+        thresholds=sweep_thresholds,
+        manual_groups=manual_groups,
+    )
+    recommended_threshold, recommended_reason = recommend_threshold(threshold_results, bool(manual_groups))
+
+    write_smoke_markdown(
+        output_path=output_path,
+        input_path=input_path,
+        config=config,
+        runtime=runtime,
+        extractor=extractor,
+        openclip_reasons=openclip_reasons,
+        items=items,
+        pipeline=pipeline,
+        threshold_results=threshold_results,
+        recommended_threshold=recommended_threshold,
+        recommended_reason=recommended_reason,
+        manual_groups_path=Path(manual_groups_csv) if manual_groups_csv else None,
+    )
+    write_smoke_csv(csv_path, items, manual_groups)
     return SmokeTestResult(
         report_path=output_path,
         csv_path=csv_path,
@@ -93,6 +173,10 @@ def run_model_pipeline_smoke(
         openclip_reasons=openclip_reasons,
         pipeline=pipeline,
         photo_count=len(items),
+        threshold_results=threshold_results,
+        recommended_threshold=recommended_threshold,
+        recommended_reason=recommended_reason,
+        manual_groups_path=Path(manual_groups_csv) if manual_groups_csv else None,
     )
 
 
@@ -110,6 +194,240 @@ def scan_image_paths(input_dir: Path | str) -> list[Path]:
     )
 
 
+def load_manual_groups_csv(csv_path: Path | str | None) -> dict[str, str]:
+    if not csv_path:
+        return {}
+    path = Path(csv_path)
+    manual_groups: dict[str, str] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            file_name = (row.get("file_name") or row.get("filename") or "").strip()
+            manual_group = (row.get("manual_group") or row.get("group") or "").strip()
+            if file_name and manual_group:
+                manual_groups[file_name] = manual_group
+    return manual_groups
+
+
+def parse_thresholds(value: str | None) -> list[float]:
+    if not value:
+        return []
+    thresholds: list[float] = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        thresholds.append(float(part))
+    return _normalize_thresholds(thresholds)
+
+
+def build_threshold_sweep(
+    items: Sequence[PhotoItem],
+    embeddings: Sequence[EmbeddingResult],
+    method: str,
+    thresholds: Sequence[float],
+    manual_groups: dict[str, str] | None = None,
+) -> list[ThresholdSweepResult]:
+    manual_groups = manual_groups or {}
+    results: list[ThresholdSweepResult] = []
+    embedding_map = _embedding_map(embeddings)
+    for threshold in _normalize_thresholds(thresholds):
+        grouping = group_embeddings(items, embeddings, threshold=threshold, method=method)
+        result = build_threshold_result(items, grouping, embedding_map, threshold, manual_groups)
+        results.append(result)
+    return results
+
+
+def build_threshold_result(
+    items: Sequence[PhotoItem],
+    grouping: EmbeddingGroupingResult,
+    embedding_map: dict[Path, np.ndarray],
+    threshold: float,
+    manual_groups: dict[str, str],
+) -> ThresholdSweepResult:
+    grouped_by_id: dict[str, list[PhotoItem]] = {}
+    for item in items:
+        assignment = grouping.assignments.get(Path(item.path))
+        if assignment and assignment.auto_group_id:
+            grouped_by_id.setdefault(assignment.auto_group_id, []).append(item)
+
+    groups: list[SmokeGroupDetail] = []
+    grouped_files: set[str] = set()
+    for group_id, group_items in sorted(grouped_by_id.items()):
+        files = [item.filename for item in group_items]
+        grouped_files.update(files)
+        similarities = _pair_similarities(group_items, embedding_map)
+        average_similarity = _average(similarities)
+        min_similarity = min(similarities) if similarities else 0.0
+        max_similarity = max(similarities) if similarities else 0.0
+        confidences = [
+            grouping.assignments.get(Path(item.path)).auto_group_confidence
+            for item in group_items
+            if grouping.assignments.get(Path(item.path))
+        ]
+        average_confidence = _average(confidences)
+        manual_labels = {manual_groups.get(file_name, "") for file_name in files if manual_groups.get(file_name, "")}
+        suspected_over_merged = (
+            len(manual_labels) > 1
+            or len(files) >= max(8, int(len(items) * 0.35) if items else 8)
+            or (len(files) > 2 and min_similarity < max(0.0, threshold - 0.06))
+        )
+        low_confidence = average_confidence < LOW_CONFIDENCE_GROUP_THRESHOLD or (
+            min_similarity and min_similarity < max(0.0, threshold - 0.03)
+        )
+        groups.append(
+            SmokeGroupDetail(
+                group_id=group_id,
+                files=files,
+                average_similarity=round(average_similarity, 4),
+                min_similarity=round(min_similarity, 4),
+                max_similarity=round(max_similarity, 4),
+                average_confidence=round(average_confidence, 4),
+                low_confidence=low_confidence,
+                suspected_over_merged=suspected_over_merged,
+            )
+        )
+
+    ungrouped_files = [item.filename for item in items if item.filename not in grouped_files]
+    singleton_count = len(ungrouped_files)
+    group_sizes = [group.size for group in groups]
+    evaluation = evaluate_pair_groups([item.filename for item in items], grouped_by_id, manual_groups) if manual_groups else None
+    near_miss_pairs = find_near_miss_pairs(items, embedding_map, grouping, threshold)
+    return ThresholdSweepResult(
+        threshold=threshold,
+        group_count=len(groups),
+        max_group_size=max(group_sizes) if group_sizes else 0,
+        singleton_count=singleton_count,
+        average_group_size=round(_average(group_sizes), 2),
+        low_confidence_group_count=sum(1 for group in groups if group.low_confidence),
+        groups=groups,
+        ungrouped_files=ungrouped_files,
+        low_confidence_groups=[group.group_id for group in groups if group.low_confidence],
+        suspected_over_merged_groups=[group.group_id for group in groups if group.suspected_over_merged],
+        near_miss_pairs=near_miss_pairs,
+        evaluation=evaluation,
+    )
+
+
+def evaluate_pair_groups(
+    file_names: Sequence[str],
+    grouped_by_id: dict[str, list[PhotoItem]],
+    manual_groups: dict[str, str],
+) -> PairEvaluation:
+    considered = [file_name for file_name in file_names if manual_groups.get(file_name)]
+    predicted_group: dict[str, str] = {file_name: f"single:{file_name}" for file_name in considered}
+    for group_id, items in grouped_by_id.items():
+        for item in items:
+            if item.filename in predicted_group:
+                predicted_group[item.filename] = group_id
+
+    tp = fp = fn = 0
+    for left, right in combinations(considered, 2):
+        manual_same = manual_groups[left] == manual_groups[right]
+        predicted_same = predicted_group[left] == predicted_group[right] and not predicted_group[left].startswith("single:")
+        if predicted_same and manual_same:
+            tp += 1
+        elif predicted_same and not manual_same:
+            fp += 1
+        elif manual_same and not predicted_same:
+            fn += 1
+
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+
+    over_merge = 0
+    for items in grouped_by_id.values():
+        labels = {manual_groups.get(item.filename, "") for item in items if manual_groups.get(item.filename, "")}
+        if len(labels) > 1:
+            over_merge += 1
+
+    manual_to_files: dict[str, list[str]] = {}
+    for file_name in considered:
+        manual_to_files.setdefault(manual_groups[file_name], []).append(file_name)
+    over_split = 0
+    for files in manual_to_files.values():
+        if len(files) < 2:
+            continue
+        predicted_clusters = {predicted_group[file_name] for file_name in files}
+        if len(predicted_clusters) > 1:
+            over_split += 1
+
+    return PairEvaluation(
+        pair_precision=round(precision, 4),
+        pair_recall=round(recall, 4),
+        pair_f1=round(f1, 4),
+        true_positive_pairs=tp,
+        false_positive_pairs=fp,
+        false_negative_pairs=fn,
+        over_merge_count=over_merge,
+        over_split_count=over_split,
+    )
+
+
+def find_near_miss_pairs(
+    items: Sequence[PhotoItem],
+    embedding_map: dict[Path, np.ndarray],
+    grouping: EmbeddingGroupingResult,
+    threshold: float,
+    limit: int = 8,
+) -> list[tuple[str, str, float]]:
+    group_by_file = {
+        path.name: assignment.auto_group_id
+        for path, assignment in grouping.assignments.items()
+        if assignment.auto_group_id
+    }
+    near_misses: list[tuple[str, str, float]] = []
+    lower_bound = max(-1.0, threshold - 0.03)
+    for left, right in combinations(items, 2):
+        if group_by_file.get(left.filename) and group_by_file.get(left.filename) == group_by_file.get(right.filename):
+            continue
+        similarity = _cosine_for_items(left, right, embedding_map)
+        if lower_bound <= similarity < threshold:
+            near_misses.append((left.filename, right.filename, round(similarity, 4)))
+    return sorted(near_misses, key=lambda value: value[2], reverse=True)[:limit]
+
+
+def recommend_threshold(results: Sequence[ThresholdSweepResult], has_manual_groups: bool) -> tuple[float, str]:
+    if not results:
+        return 0.0, "没有可用阈值结果。"
+    if has_manual_groups:
+        best = max(
+            results,
+            key=lambda result: (
+                result.evaluation.pair_f1 if result.evaluation else 0.0,
+                result.evaluation.pair_precision if result.evaluation else 0.0,
+                result.evaluation.pair_recall if result.evaluation else 0.0,
+                -result.evaluation.over_merge_count if result.evaluation else 0,
+                -result.evaluation.over_split_count if result.evaluation else 0,
+            ),
+        )
+        score = best.evaluation.pair_f1 if best.evaluation else 0.0
+        return best.threshold, f"基于人工标注 pair F1 最高推荐，F1={score:.3f}。"
+
+    total = max(1, results[0].singleton_count + sum(group.size for group in results[0].groups))
+
+    def heuristic(result: ThresholdSweepResult) -> float:
+        grouped_count = total - result.singleton_count
+        too_large_penalty = max(0, result.max_group_size - max(6, int(total * 0.35))) * 0.8
+        near_miss_bonus = min(2, len(result.near_miss_pairs)) * 0.08
+        return (
+            grouped_count * 0.12
+            + result.group_count * 0.45
+            - result.low_confidence_group_count * 0.9
+            - len(result.suspected_over_merged_groups) * 1.4
+            - too_large_penalty
+            - abs(result.threshold - 0.86) * 0.6
+            + near_miss_bonus
+        )
+
+    best = max(results, key=heuristic)
+    return (
+        best.threshold,
+        "未提供人工标注，按组数量、低置信度组、疑似过度合并和默认阈值距离综合推荐。",
+    )
+
+
 def write_smoke_markdown(
     output_path: Path,
     input_path: Path,
@@ -119,11 +437,12 @@ def write_smoke_markdown(
     openclip_reasons: list[str],
     items: list[PhotoItem],
     pipeline: ModelPipelineResult,
+    threshold_results: Sequence[ThresholdSweepResult],
+    recommended_threshold: float,
+    recommended_reason: str,
+    manual_groups_path: Path | None = None,
 ) -> None:
-    grouped = [item for item in items if item.auto_group_id]
-    groups: dict[str, list[PhotoItem]] = {}
-    for item in grouped:
-        groups.setdefault(item.auto_group_id, []).append(item)
+    primary_result = _find_threshold_result(threshold_results, config.embedding_similarity_threshold)
     lines = [
         "# Model Pipeline Smoke Test",
         "",
@@ -140,7 +459,10 @@ def write_smoke_markdown(
         f"- cache 命中数：{pipeline.cache_hits}",
         f"- fallback 数：{len(pipeline.embeddings) if pipeline.method == 'ahash_fallback' else 0}",
         f"- skipped 数：{len(pipeline.skipped)}",
-        f"- 自动分组数量：{len(pipeline.grouping.groups)}",
+        f"- 当前阈值自动分组数量：{primary_result.group_count if primary_result else len(pipeline.grouping.groups)}",
+        f"- 推荐阈值：{recommended_threshold:.2f}",
+        f"- 推荐理由：{recommended_reason}",
+        f"- 人工标注 CSV：`{manual_groups_path}`" if manual_groups_path else "- 人工标注 CSV：未提供",
         f"- 总耗时：{pipeline.elapsed_ms:.1f} ms",
         "",
         "## Runtime",
@@ -158,24 +480,88 @@ def write_smoke_markdown(
         lines.append("- OpenCLIP：不可用或未使用")
         for reason in openclip_reasons or ["未选择 OpenCLIP backend"]:
             lines.append(f"- 原因：{reason}")
-    lines.extend(["", "## Groups"])
-    if not groups:
-        lines.append("未生成自动相似组。")
-    group_similarity = {group.group_id: group.average_similarity for group in pipeline.grouping.groups}
-    for group_id, group_items in sorted(groups.items()):
-        avg_confidence = sum(item.auto_group_confidence for item in group_items) / max(1, len(group_items))
-        avg_similarity = group_similarity.get(group_id, _average_nearest_similarity(group_items))
-        lines.extend(
-            [
-                f"### {group_id}",
-                f"- 数量：{len(group_items)}",
-                f"- 平均 confidence：{avg_confidence:.3f}",
-                f"- 平均 nearest similarity：{avg_similarity:.3f}",
-                "- 文件：",
-            ]
+
+    lines.extend(["", "## Threshold Summary", ""])
+    header = [
+        "| threshold | groups | max group | singletons | avg group | low confidence | over merge? | near split hints | precision | recall | F1 |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    lines.extend(header)
+    for result in threshold_results:
+        if result.evaluation:
+            precision_text = f"{result.evaluation.pair_precision:.3f}"
+            recall_text = f"{result.evaluation.pair_recall:.3f}"
+            f1_text = f"{result.evaluation.pair_f1:.3f}"
+        else:
+            precision_text = recall_text = f1_text = "-"
+        lines.append(
+            f"| {result.threshold:.2f} | {result.group_count} | {result.max_group_size} | "
+            f"{result.singleton_count} | {result.average_group_size:.2f} | "
+            f"{result.low_confidence_group_count} | {len(result.suspected_over_merged_groups)} | "
+            f"{len(result.near_miss_pairs)} | {precision_text} | {recall_text} | {f1_text} |"
         )
-        for item in group_items:
-            lines.append(f"  - {item.filename}")
+
+    for result in threshold_results:
+        lines.extend(["", f"## Threshold {result.threshold:.2f} Details"])
+        if not result.groups:
+            lines.append("未生成自动相似组。")
+        for group in result.groups:
+            flags = []
+            if group.low_confidence:
+                flags.append("低置信度")
+            if group.suspected_over_merged:
+                flags.append("疑似过度合并")
+            flag_text = f"（{' / '.join(flags)}）" if flags else ""
+            lines.extend(
+                [
+                    f"### {group.group_id} {flag_text}",
+                    f"- 数量：{group.size}",
+                    f"- 平均相似度：{group.average_similarity:.4f}",
+                    f"- 最低相似度：{group.min_similarity:.4f}",
+                    f"- 最高相似度：{group.max_similarity:.4f}",
+                    f"- 平均 confidence：{group.average_confidence:.4f}",
+                    "- 文件：",
+                ]
+            )
+            for file_name in group.files:
+                lines.append(f"  - {file_name}")
+
+        lines.extend(["", "### 未分组照片"])
+        if result.ungrouped_files:
+            lines.extend([f"- {file_name}" for file_name in result.ungrouped_files])
+        else:
+            lines.append("- 无")
+
+        lines.extend(["", "### 低置信度组"])
+        lines.append(", ".join(result.low_confidence_groups) if result.low_confidence_groups else "无")
+
+        lines.extend(["", "### 疑似过度合并组"])
+        lines.append(", ".join(result.suspected_over_merged_groups) if result.suspected_over_merged_groups else "无")
+
+        lines.extend(["", "### 疑似过度拆分提示"])
+        if result.near_miss_pairs:
+            for left, right, similarity in result.near_miss_pairs:
+                lines.append(f"- {left} ↔ {right}：similarity={similarity:.4f}，接近阈值但未进入同组")
+        else:
+            lines.append("无明显 near-threshold 拆分提示。")
+
+        if result.evaluation:
+            eval_result = result.evaluation
+            lines.extend(
+                [
+                    "",
+                    "### 人工标注评估",
+                    f"- pair precision：{eval_result.pair_precision:.4f}",
+                    f"- pair recall：{eval_result.pair_recall:.4f}",
+                    f"- pair F1：{eval_result.pair_f1:.4f}",
+                    f"- true positive pairs：{eval_result.true_positive_pairs}",
+                    f"- false positive pairs：{eval_result.false_positive_pairs}",
+                    f"- false negative pairs：{eval_result.false_negative_pairs}",
+                    f"- over_merge 数量：{eval_result.over_merge_count}",
+                    f"- over_split 数量：{eval_result.over_split_count}",
+                ]
+            )
+
     lines.extend(["", "## Per Photo"])
     for item in items:
         lines.append(
@@ -190,10 +576,12 @@ def write_smoke_markdown(
     output_path.write_text("\n".join(lines), encoding="utf-8-sig")
 
 
-def write_smoke_csv(csv_path: Path, items: list[PhotoItem]) -> None:
+def write_smoke_csv(csv_path: Path, items: list[PhotoItem], manual_groups: dict[str, str] | None = None) -> None:
+    manual_groups = manual_groups or {}
     fields = [
         "file_name",
         "path",
+        "manual_group",
         "auto_group_id",
         "auto_group_confidence",
         "auto_group_rank",
@@ -213,6 +601,7 @@ def write_smoke_csv(csv_path: Path, items: list[PhotoItem]) -> None:
                 {
                     "file_name": item.filename,
                     "path": str(item.path),
+                    "manual_group": manual_groups.get(item.filename, ""),
                     "auto_group_id": item.auto_group_id,
                     "auto_group_confidence": item.auto_group_confidence,
                     "auto_group_rank": item.auto_group_rank,
@@ -286,15 +675,48 @@ def _embedding_dim(items: list[PhotoItem]) -> int:
     return 0
 
 
-def _average_nearest_similarity(items: list[PhotoItem]) -> float:
-    values = []
-    for item in items:
-        reason = item.auto_group_reason or ""
-        if "fallback" in reason.lower():
-            values.append(item.auto_group_confidence / 0.72 if item.auto_group_confidence else 0.0)
-        else:
-            values.append(item.auto_group_confidence / 0.96 if item.auto_group_confidence else 0.0)
-    return sum(values) / max(1, len(values))
+def _normalize_thresholds(thresholds: Sequence[float]) -> list[float]:
+    normalized = sorted({round(float(value), 4) for value in thresholds})
+    return [value for value in normalized if -1.0 <= value <= 1.0]
+
+
+def _embedding_map(embeddings: Sequence[EmbeddingResult]) -> dict[Path, np.ndarray]:
+    return {Path(result.image_path): _normalize_array(result.vector) for result in embeddings if result.vector}
+
+
+def _normalize_array(vector: Sequence[float]) -> np.ndarray:
+    array = np.asarray(vector, dtype="float32").reshape(-1)
+    norm = float(np.linalg.norm(array))
+    return array / norm if norm > 1e-12 else array
+
+
+def _pair_similarities(items: Sequence[PhotoItem], embedding_map: dict[Path, np.ndarray]) -> list[float]:
+    values: list[float] = []
+    for left, right in combinations(items, 2):
+        values.append(_cosine_for_items(left, right, embedding_map))
+    return values
+
+
+def _cosine_for_items(left: PhotoItem, right: PhotoItem, embedding_map: dict[Path, np.ndarray]) -> float:
+    left_vector = embedding_map.get(Path(left.path))
+    right_vector = embedding_map.get(Path(right.path))
+    if left_vector is None or right_vector is None:
+        return 0.0
+    return float(np.dot(left_vector, right_vector))
+
+
+def _average(values: Sequence[float | int]) -> float:
+    return float(sum(values) / len(values)) if values else 0.0
+
+
+def _find_threshold_result(
+    results: Sequence[ThresholdSweepResult],
+    threshold: float,
+) -> ThresholdSweepResult | None:
+    for result in results:
+        if abs(result.threshold - threshold) < 1e-6:
+            return result
+    return results[0] if results else None
 
 
 def result_to_json(result: SmokeTestResult) -> str:
@@ -312,6 +734,19 @@ def result_to_json(result: SmokeTestResult) -> str:
             "cache_hits": result.pipeline.cache_hits,
             "skipped": len(result.pipeline.skipped),
             "groups": len(result.pipeline.grouping.groups),
+            "recommended_threshold": result.recommended_threshold,
+            "recommended_reason": result.recommended_reason,
+            "thresholds": [
+                {
+                    "threshold": threshold.threshold,
+                    "group_count": threshold.group_count,
+                    "max_group_size": threshold.max_group_size,
+                    "singleton_count": threshold.singleton_count,
+                    "low_confidence_group_count": threshold.low_confidence_group_count,
+                    "pair_f1": threshold.evaluation.pair_f1 if threshold.evaluation else None,
+                }
+                for threshold in result.threshold_results
+            ],
         },
         ensure_ascii=False,
         indent=2,
