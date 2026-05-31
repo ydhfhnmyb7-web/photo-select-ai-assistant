@@ -32,6 +32,10 @@ def group_embeddings(
     grouping_strategy: str = GROUPING_COMPLETE_LINKAGE,
     group_min_similarity_threshold: float = 0.92,
     max_group_size: int = 25,
+    sequence_window_size: int = 5,
+    max_filename_gap: int = 80,
+    max_time_gap_seconds: int = 120,
+    filename_continuity_bonus: float = 0.01,
 ) -> EmbeddingGroupingResult:
     """Group visual embeddings without writing any project state.
 
@@ -43,6 +47,10 @@ def group_embeddings(
     threshold = float(threshold)
     group_min_similarity_threshold = float(group_min_similarity_threshold)
     max_group_size = max(2, int(max_group_size or 25))
+    sequence_window_size = max(1, int(sequence_window_size or 5))
+    max_filename_gap = max(0, int(max_filename_gap or 0))
+    max_time_gap_seconds = max(0, int(max_time_gap_seconds or 0))
+    filename_continuity_bonus = max(0.0, float(filename_continuity_bonus or 0.0))
 
     path_to_embedding = {Path(result.image_path): result for result in embeddings}
     indexed: list[tuple[int, PhotoItem, EmbeddingResult, np.ndarray]] = []
@@ -51,18 +59,20 @@ def group_embeddings(
         if result and result.vector:
             indexed.append((index, item, result, normalize_vector(result.vector)))
 
-    similarity_matrix, nearest_similarity = _build_similarity_matrix(indexed)
+    similarity_matrix, raw_similarity_matrix, nearest_similarity = _build_similarity_matrix(indexed)
     if grouping_strategy == GROUPING_CONNECTED_COMPONENTS:
         clusters = _connected_components(indexed, similarity_matrix, threshold)
     elif grouping_strategy == GROUPING_SEQUENCE_CONSTRAINED:
-        legacy_clusters = _connected_components(indexed, similarity_matrix, threshold)
-        clusters = _split_high_risk_clusters(
-            clusters=legacy_clusters,
+        clusters = _sequence_constrained_clusters(
             indexed=indexed,
             similarity_matrix=similarity_matrix,
+            raw_similarity_matrix=raw_similarity_matrix,
             threshold=threshold,
             group_min_similarity_threshold=group_min_similarity_threshold,
             max_group_size=max_group_size,
+            sequence_window_size=sequence_window_size,
+            max_filename_gap=max_filename_gap,
+            max_time_gap_seconds=max_time_gap_seconds,
         )
     elif grouping_strategy == GROUPING_AVERAGE_LINKAGE:
         clusters = _greedy_linkage_clusters(
@@ -107,6 +117,14 @@ def group_embeddings(
             max_similarity=round(stats["max"], 4),
             high_risk_overmerge=high_risk,
             grouping_strategy=grouping_strategy,
+            sequence_break_reason=_sequence_break_reason(
+                grouping_strategy,
+                sequence_window_size,
+                max_filename_gap,
+                max_time_gap_seconds,
+                filename_continuity_bonus,
+                high_risk,
+            ),
         )
         groups.append(group)
         for rank, index in enumerate(ranked, start=1):
@@ -155,19 +173,23 @@ def apply_auto_group_assignments(items: Sequence[PhotoItem], result: EmbeddingGr
 
 def _build_similarity_matrix(
     indexed: list[tuple[int, PhotoItem, EmbeddingResult, np.ndarray]],
-) -> tuple[dict[tuple[int, int], float], dict[int, float]]:
+) -> tuple[dict[tuple[int, int], float], dict[tuple[int, int], float], dict[int, float]]:
     similarity_matrix: dict[tuple[int, int], float] = {}
+    raw_similarity_matrix: dict[tuple[int, int], float] = {}
     nearest_similarity: dict[int, float] = defaultdict(float)
     for left_pos, (left_index, left_item, _left_result, left_vector) in enumerate(indexed):
         similarity_matrix[(left_index, left_index)] = 1.0
+        raw_similarity_matrix[(left_index, left_index)] = 1.0
         for right_index, right_item, _right_result, right_vector in indexed[left_pos + 1 :]:
             similarity = float(np.dot(left_vector, right_vector))
             adjusted = _adjust_similarity(similarity, left_item, right_item)
             similarity_matrix[(left_index, right_index)] = adjusted
             similarity_matrix[(right_index, left_index)] = adjusted
+            raw_similarity_matrix[(left_index, right_index)] = similarity
+            raw_similarity_matrix[(right_index, left_index)] = similarity
             nearest_similarity[left_index] = max(nearest_similarity[left_index], adjusted)
             nearest_similarity[right_index] = max(nearest_similarity[right_index], adjusted)
-    return similarity_matrix, nearest_similarity
+    return similarity_matrix, raw_similarity_matrix, nearest_similarity
 
 
 def _connected_components(
@@ -235,6 +257,73 @@ def _greedy_linkage_clusters(
     return [sorted(values) for values in clusters]
 
 
+def _sequence_constrained_clusters(
+    indexed: list[tuple[int, PhotoItem, EmbeddingResult, np.ndarray]],
+    similarity_matrix: dict[tuple[int, int], float],
+    raw_similarity_matrix: dict[tuple[int, int], float],
+    threshold: float,
+    group_min_similarity_threshold: float,
+    max_group_size: int,
+    sequence_window_size: int,
+    max_filename_gap: int,
+    max_time_gap_seconds: int,
+) -> list[list[int]]:
+    ordered = sorted(indexed, key=lambda value: _sequence_sort_key(value[0], value[1]))
+    index_to_pos = {index: pos for pos, (index, *_rest) in enumerate(ordered)}
+    parent = {index: index for index, *_rest in ordered}
+
+    def find(value: int) -> int:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for left_pos, (left_index, left_item, *_left_rest) in enumerate(ordered):
+        right_limit = min(len(ordered), left_pos + sequence_window_size + 1)
+        for right_index, right_item, *_right_rest in ordered[left_pos + 1 : right_limit]:
+            if not _sequence_pair_allowed(
+                left_item,
+                right_item,
+                max_filename_gap=max_filename_gap,
+                max_time_gap_seconds=max_time_gap_seconds,
+            ):
+                continue
+            # The raw OpenCLIP/fallback cosine must clear the threshold; filename
+            # and time are only gates, not a substitute for visual similarity.
+            if raw_similarity_matrix.get((left_index, right_index), -1.0) >= threshold:
+                union(left_index, right_index)
+
+    clusters_by_root: dict[int, list[int]] = defaultdict(list)
+    for index, *_rest in ordered:
+        clusters_by_root[find(index)].append(index)
+    clusters = [sorted(values, key=lambda index: index_to_pos.get(index, index)) for values in clusters_by_root.values()]
+
+    split_clusters: list[list[int]] = []
+    index_to_tuple = {index: value for value in indexed for index in [value[0]]}
+    for cluster in clusters:
+        stats = _group_similarity_stats(cluster, raw_similarity_matrix)
+        if not _is_high_risk_overmerge(len(cluster), stats["min"], max_group_size, group_min_similarity_threshold):
+            split_clusters.append(sorted(cluster))
+            continue
+        subset = [index_to_tuple[index] for index in cluster if index in index_to_tuple]
+        split_clusters.extend(
+            _greedy_linkage_clusters(
+                indexed=subset,
+                similarity_matrix=raw_similarity_matrix,
+                threshold=group_min_similarity_threshold,
+                group_min_similarity_threshold=group_min_similarity_threshold,
+                strategy=GROUPING_COMPLETE_LINKAGE,
+            )
+        )
+    return [sorted(values) for values in split_clusters]
+
+
 def _split_high_risk_clusters(
     clusters: list[list[int]],
     indexed: list[tuple[int, PhotoItem, EmbeddingResult, np.ndarray]],
@@ -282,6 +371,46 @@ def _is_high_risk_overmerge(
     return size > max_group_size or (size > 2 and min_similarity < group_min_similarity_threshold)
 
 
+def _sequence_sort_key(index: int, item: PhotoItem) -> tuple[int, int, str]:
+    number = _filename_number(item.filename)
+    return (0 if number is not None else 1, number if number is not None else index, item.filename.lower())
+
+
+def _sequence_pair_allowed(
+    left: PhotoItem,
+    right: PhotoItem,
+    max_filename_gap: int,
+    max_time_gap_seconds: int,
+) -> bool:
+    if max_filename_gap > 0:
+        number_delta = _filename_number_delta(left.filename, right.filename)
+        if number_delta is not None and number_delta > max_filename_gap:
+            return False
+    if max_time_gap_seconds > 0 and left.taken_at and right.taken_at:
+        seconds = _time_delta_seconds(left.taken_at, right.taken_at)
+        if seconds is not None and seconds > max_time_gap_seconds:
+            return False
+    return True
+
+
+def _sequence_break_reason(
+    grouping_strategy: str,
+    sequence_window_size: int,
+    max_filename_gap: int,
+    max_time_gap_seconds: int,
+    filename_continuity_bonus: float,
+    high_risk: bool,
+) -> str:
+    if grouping_strategy != GROUPING_SEQUENCE_CONSTRAINED:
+        return ""
+    risk = " high-risk-overmerge" if high_risk else ""
+    return (
+        f"sequence_window_size={sequence_window_size}; max_filename_gap={max_filename_gap}; "
+        f"max_time_gap_seconds={max_time_gap_seconds}; filename_continuity_bonus={filename_continuity_bonus:.3f};"
+        f"{risk}"
+    ).strip()
+
+
 def _adjust_similarity(base_similarity: float, left: PhotoItem, right: PhotoItem) -> float:
     adjusted = base_similarity
     if _orientation(left) != _orientation(right):
@@ -315,12 +444,19 @@ def _orientation(item: PhotoItem) -> str:
 
 
 def _filename_number_delta(left: str, right: str) -> int | None:
-    left_digits = "".join(char for char in Path(left).stem if char.isdigit())
-    right_digits = "".join(char for char in Path(right).stem if char.isdigit())
-    if not left_digits or not right_digits:
+    left_number = _filename_number(left)
+    right_number = _filename_number(right)
+    if left_number is None or right_number is None:
+        return None
+    return abs(left_number - right_number)
+
+
+def _filename_number(value: str) -> int | None:
+    digits = "".join(char for char in Path(value).stem if char.isdigit())
+    if not digits:
         return None
     try:
-        return abs(int(left_digits[-8:]) - int(right_digits[-8:]))
+        return int(digits[-8:])
     except ValueError:
         return None
 

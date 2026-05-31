@@ -6,7 +6,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.mvp_models import PhotoItem
-from app.model_pipeline.embedding_grouping import GROUPING_COMPLETE_LINKAGE, GROUPING_CONNECTED_COMPONENTS, group_embeddings
+from app.model_pipeline.embedding_grouping import (
+    GROUPING_COMPLETE_LINKAGE,
+    GROUPING_CONNECTED_COMPONENTS,
+    GROUPING_SEQUENCE_CONSTRAINED,
+    group_embeddings,
+)
 from app.model_pipeline.embedding_types import EmbeddingResult
 
 
@@ -141,10 +146,111 @@ def test_large_group_is_marked_high_risk_overmerge() -> None:
     assert result.groups[0].high_risk_overmerge is True
 
 
+def test_sequence_constrained_groups_continuous_similar_files() -> None:
+    items = [_item("IMG_0001.jpg"), _item("IMG_0002.jpg")]
+    embeddings = [
+        _embedding("IMG_0001.jpg", [1.0, 0.0, 0.0]),
+        _embedding("IMG_0002.jpg", [0.99, 0.04, 0.0]),
+    ]
+
+    result = group_embeddings(
+        items,
+        embeddings,
+        threshold=0.96,
+        method="mock_embedding",
+        grouping_strategy=GROUPING_SEQUENCE_CONSTRAINED,
+        sequence_window_size=3,
+        max_filename_gap=5,
+    )
+
+    assert len(result.groups) == 1
+    assert result.assignments[Path("IMG_0001.jpg")].auto_group_id == result.assignments[Path("IMG_0002.jpg")].auto_group_id
+    assert "sequence_window_size=3" in result.groups[0].sequence_break_reason
+
+
+def test_sequence_constrained_rejects_large_filename_gap() -> None:
+    items = [_item("IMG_0001.jpg"), _item("IMG_0200.jpg")]
+    embeddings = [
+        _embedding("IMG_0001.jpg", [1.0, 0.0, 0.0]),
+        _embedding("IMG_0200.jpg", [1.0, 0.0, 0.0]),
+    ]
+
+    result = group_embeddings(
+        items,
+        embeddings,
+        threshold=0.96,
+        method="mock_embedding",
+        grouping_strategy=GROUPING_SEQUENCE_CONSTRAINED,
+        sequence_window_size=5,
+        max_filename_gap=20,
+    )
+
+    assert len(result.groups) == 0
+    assert result.assignments[Path("IMG_0001.jpg")].auto_group_id == ""
+
+
+def test_sequence_constrained_requires_visual_similarity() -> None:
+    items = [_item("IMG_0001.jpg"), _item("IMG_0002.jpg")]
+    embeddings = [
+        _embedding("IMG_0001.jpg", [1.0, 0.0, 0.0]),
+        _embedding("IMG_0002.jpg", [0.0, 1.0, 0.0]),
+    ]
+
+    result = group_embeddings(
+        items,
+        embeddings,
+        threshold=0.96,
+        method="mock_embedding",
+        grouping_strategy=GROUPING_SEQUENCE_CONSTRAINED,
+        sequence_window_size=3,
+        max_filename_gap=5,
+    )
+
+    assert len(result.groups) == 0
+
+
+def test_sequence_constrained_splits_chain_when_group_min_similarity_is_low() -> None:
+    items = [_item("IMG_0001.jpg"), _item("IMG_0002.jpg"), _item("IMG_0003.jpg")]
+    embeddings = [
+        _embedding("IMG_0001.jpg", [0.97, 0.2431, 0.0]),
+        _embedding("IMG_0002.jpg", [1.0, 0.0, 0.0]),
+        _embedding("IMG_0003.jpg", [0.97, 0.0, 0.2431]),
+    ]
+
+    legacy = group_embeddings(
+        items,
+        embeddings,
+        threshold=0.96,
+        method="mock_embedding",
+        grouping_strategy=GROUPING_CONNECTED_COMPONENTS,
+        group_min_similarity_threshold=0.95,
+    )
+    sequence = group_embeddings(
+        items,
+        embeddings,
+        threshold=0.96,
+        method="mock_embedding",
+        grouping_strategy=GROUPING_SEQUENCE_CONSTRAINED,
+        group_min_similarity_threshold=0.95,
+        sequence_window_size=3,
+        max_filename_gap=5,
+    )
+
+    assert len(legacy.groups) == 1
+    assert legacy.groups[0].indexes == [0, 1, 2]
+    assert len(sequence.groups) == 1
+    assert sequence.groups[0].indexes == [0, 1]
+    assert sequence.assignments[Path("IMG_0003.jpg")].auto_group_id == ""
+
+
 if __name__ == "__main__":
     test_cosine_grouping_clusters_similar_vectors_only()
     test_orientation_and_person_count_can_reduce_borderline_similarity()
     test_complete_linkage_prevents_chain_overmerge()
     test_group_min_similarity_is_calculated_for_chain_group()
     test_large_group_is_marked_high_risk_overmerge()
+    test_sequence_constrained_groups_continuous_similar_files()
+    test_sequence_constrained_rejects_large_filename_gap()
+    test_sequence_constrained_requires_visual_similarity()
+    test_sequence_constrained_splits_chain_when_group_min_similarity_is_low()
     print("embedding grouping tests passed")

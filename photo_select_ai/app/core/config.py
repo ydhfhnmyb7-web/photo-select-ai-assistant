@@ -69,6 +69,10 @@ class AppConfig:
     grouping_strategy: str = "complete_linkage"
     group_min_similarity_threshold: float = 0.92
     max_embedding_group_size: int = 25
+    sequence_window_size: int = 5
+    max_filename_gap: int = 80
+    max_time_gap_seconds: int = 120
+    filename_continuity_bonus: float = 0.01
 
 
 def load_config() -> AppConfig:
@@ -126,6 +130,10 @@ def load_config() -> AppConfig:
         config.grouping_strategy = "complete_linkage"
     config.group_min_similarity_threshold = max(0.01, min(0.99, float(config.group_min_similarity_threshold)))
     config.max_embedding_group_size = max(2, int(config.max_embedding_group_size))
+    config.sequence_window_size = max(1, int(config.sequence_window_size))
+    config.max_filename_gap = max(0, int(config.max_filename_gap))
+    config.max_time_gap_seconds = max(0, int(config.max_time_gap_seconds))
+    config.filename_continuity_bonus = max(0.0, min(0.20, float(config.filename_continuity_bonus)))
     config.batch_size = _profile_batch_size(config.model_profile, config.batch_size)
     defaults = default_scoring_weights()
     if not isinstance(config.scoring_weights, dict):

@@ -22,6 +22,10 @@ def main() -> int:
     )
     parser.add_argument("--group-min-similarity", type=float, default=0.92)
     parser.add_argument("--max-group-size", type=int, default=25)
+    parser.add_argument("--sequence-window-size", type=int, default=5)
+    parser.add_argument("--max-filename-gap", type=int, default=80)
+    parser.add_argument("--max-time-gap-seconds", type=int, default=120)
+    parser.add_argument("--filename-continuity-bonus", type=float, default=0.01)
     parser.add_argument(
         "--threshold-sweep",
         default="",
@@ -46,6 +50,10 @@ def main() -> int:
         grouping_strategy=args.grouping_strategy,
         group_min_similarity_threshold=args.group_min_similarity,
         max_group_size=args.max_group_size,
+        sequence_window_size=args.sequence_window_size,
+        max_filename_gap=args.max_filename_gap,
+        max_time_gap_seconds=args.max_time_gap_seconds,
+        filename_continuity_bonus=args.filename_continuity_bonus,
     )
     print(result_to_json(result))
     return 0

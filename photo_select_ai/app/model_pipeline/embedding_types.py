@@ -49,6 +49,7 @@ class EmbeddingGroup:
     max_similarity: float = 0.0
     high_risk_overmerge: bool = False
     grouping_strategy: str = "connected_components"
+    sequence_break_reason: str = ""
 
 
 @dataclass

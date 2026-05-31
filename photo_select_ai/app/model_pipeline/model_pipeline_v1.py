@@ -121,6 +121,10 @@ def run_model_pipeline_v1(
         grouping_strategy=config.grouping_strategy,
         group_min_similarity_threshold=config.group_min_similarity_threshold,
         max_group_size=config.max_embedding_group_size,
+        sequence_window_size=config.sequence_window_size,
+        max_filename_gap=config.max_filename_gap,
+        max_time_gap_seconds=config.max_time_gap_seconds,
+        filename_continuity_bonus=config.filename_continuity_bonus,
     )
     apply_auto_group_assignments(items, grouping)
     for item in items:

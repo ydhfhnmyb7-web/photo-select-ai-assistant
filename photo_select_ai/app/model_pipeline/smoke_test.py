@@ -53,6 +53,7 @@ class SmokeGroupDetail:
     low_confidence: bool = False
     suspected_over_merged: bool = False
     high_risk_overmerge: bool = False
+    sequence_break_reason: str = ""
 
     @property
     def size(self) -> int:
@@ -107,6 +108,10 @@ def run_model_pipeline_smoke(
     grouping_strategy: str = "complete_linkage",
     group_min_similarity_threshold: float = 0.92,
     max_group_size: int = 25,
+    sequence_window_size: int = 5,
+    max_filename_gap: int = 80,
+    max_time_gap_seconds: int = 120,
+    filename_continuity_bonus: float = 0.01,
 ) -> SmokeTestResult:
     input_path = Path(input_dir)
     output_path = Path(output_report) if output_report else input_path / "model_pipeline_smoke_report.md"
@@ -121,6 +126,10 @@ def run_model_pipeline_smoke(
         grouping_strategy=grouping_strategy,
         group_min_similarity_threshold=group_min_similarity_threshold,
         max_embedding_group_size=max_group_size,
+        sequence_window_size=sequence_window_size,
+        max_filename_gap=max_filename_gap,
+        max_time_gap_seconds=max_time_gap_seconds,
+        filename_continuity_bonus=filename_continuity_bonus,
     )
     runtime = detect_model_runtime(config.use_gpu)
     extractor, openclip_reasons = _build_smoke_extractor(config, runtime)
@@ -157,6 +166,10 @@ def run_model_pipeline_smoke(
         grouping_strategy=config.grouping_strategy,
         group_min_similarity_threshold=config.group_min_similarity_threshold,
         max_group_size=config.max_embedding_group_size,
+        sequence_window_size=config.sequence_window_size,
+        max_filename_gap=config.max_filename_gap,
+        max_time_gap_seconds=config.max_time_gap_seconds,
+        filename_continuity_bonus=config.filename_continuity_bonus,
     )
     recommended_threshold, recommended_reason = recommend_threshold(threshold_results, bool(manual_groups))
 
@@ -242,6 +255,10 @@ def build_threshold_sweep(
     grouping_strategy: str = "complete_linkage",
     group_min_similarity_threshold: float = 0.92,
     max_group_size: int = 25,
+    sequence_window_size: int = 5,
+    max_filename_gap: int = 80,
+    max_time_gap_seconds: int = 120,
+    filename_continuity_bonus: float = 0.01,
 ) -> list[ThresholdSweepResult]:
     manual_groups = manual_groups or {}
     results: list[ThresholdSweepResult] = []
@@ -255,6 +272,10 @@ def build_threshold_sweep(
             grouping_strategy=grouping_strategy,
             group_min_similarity_threshold=group_min_similarity_threshold,
             max_group_size=max_group_size,
+            sequence_window_size=sequence_window_size,
+            max_filename_gap=max_filename_gap,
+            max_time_gap_seconds=max_time_gap_seconds,
+            filename_continuity_bonus=filename_continuity_bonus,
         )
         result = build_threshold_result(items, grouping, embedding_map, threshold, manual_groups)
         results.append(result)
@@ -312,6 +333,7 @@ def build_threshold_result(
                 low_confidence=low_confidence,
                 suspected_over_merged=suspected_over_merged,
                 high_risk_overmerge=bool(grouping_group and grouping_group.high_risk_overmerge),
+                sequence_break_reason=grouping_group.sequence_break_reason if grouping_group else "",
             )
         )
 
@@ -483,6 +505,10 @@ def write_smoke_markdown(
         f"- grouping_strategy：`{config.grouping_strategy}`",
         f"- group_min_similarity_threshold：`{config.group_min_similarity_threshold}`",
         f"- max_group_size：`{config.max_embedding_group_size}`",
+        f"- sequence_window_size：`{config.sequence_window_size}`",
+        f"- max_filename_gap：`{config.max_filename_gap}`",
+        f"- max_time_gap_seconds：`{config.max_time_gap_seconds}`",
+        f"- filename_continuity_bonus：`{config.filename_continuity_bonus}`",
         f"- device 实际：`{_device_label(extractor, runtime)}`",
         f"- embedding_model_name：`{extractor.model_name}`",
         f"- embedding_dim：`{_embedding_dim(items)}`",
@@ -555,6 +581,7 @@ def write_smoke_markdown(
                     f"- 最低相似度：{group.min_similarity:.4f}",
                     f"- 最高相似度：{group.max_similarity:.4f}",
                     f"- 平均 confidence：{group.average_confidence:.4f}",
+                    f"- sequence_break_reason：{group.sequence_break_reason or '-'}",
                     "- 文件：",
                 ]
             )
@@ -771,6 +798,9 @@ def result_to_json(result: SmokeTestResult) -> str:
             "groups": len(result.pipeline.grouping.groups),
             "recommended_threshold": result.recommended_threshold,
             "recommended_reason": result.recommended_reason,
+            "grouping_strategy": result.pipeline.grouping.groups[0].grouping_strategy
+            if result.pipeline.grouping.groups
+            else "",
             "thresholds": [
                 {
                     "threshold": threshold.threshold,
