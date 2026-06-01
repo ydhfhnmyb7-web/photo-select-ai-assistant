@@ -243,6 +243,51 @@ def test_sequence_constrained_splits_chain_when_group_min_similarity_is_low() ->
     assert sequence.assignments[Path("IMG_0003.jpg")].auto_group_id == ""
 
 
+def test_sequence_constrained_final_group_min_similarity_must_pass() -> None:
+    items = [_item("IMG_0001.jpg"), _item("IMG_0002.jpg"), _item("IMG_0003.jpg")]
+    embeddings = [
+        _embedding("IMG_0001.jpg", [0.97, 0.2431, 0.0]),
+        _embedding("IMG_0002.jpg", [1.0, 0.0, 0.0]),
+        _embedding("IMG_0003.jpg", [0.97, 0.0, 0.2431]),
+    ]
+
+    sequence = group_embeddings(
+        items,
+        embeddings,
+        threshold=0.96,
+        method="mock_embedding",
+        grouping_strategy=GROUPING_SEQUENCE_CONSTRAINED,
+        group_min_similarity_threshold=0.98,
+        sequence_window_size=3,
+        max_filename_gap=5,
+    )
+
+    assert len(sequence.groups) == 0
+    assert all(not assignment.auto_group_id for assignment in sequence.assignments.values())
+
+
+def test_sequence_filename_bonus_does_not_break_raw_threshold() -> None:
+    items = [_item("IMG_0001.jpg"), _item("IMG_0002.jpg")]
+    embeddings = [
+        _embedding("IMG_0001.jpg", [1.0, 0.0, 0.0]),
+        _embedding("IMG_0002.jpg", [0.955, 0.2966, 0.0]),
+    ]
+
+    sequence = group_embeddings(
+        items,
+        embeddings,
+        threshold=0.96,
+        method="mock_embedding",
+        grouping_strategy=GROUPING_SEQUENCE_CONSTRAINED,
+        sequence_window_size=3,
+        max_filename_gap=5,
+        filename_continuity_bonus=0.20,
+    )
+
+    assert len(sequence.groups) == 0
+    assert sequence.assignments[Path("IMG_0001.jpg")].auto_group_id == ""
+
+
 if __name__ == "__main__":
     test_cosine_grouping_clusters_similar_vectors_only()
     test_orientation_and_person_count_can_reduce_borderline_similarity()
@@ -253,4 +298,6 @@ if __name__ == "__main__":
     test_sequence_constrained_rejects_large_filename_gap()
     test_sequence_constrained_requires_visual_similarity()
     test_sequence_constrained_splits_chain_when_group_min_similarity_is_low()
+    test_sequence_constrained_final_group_min_similarity_must_pass()
+    test_sequence_filename_bonus_does_not_break_raw_threshold()
     print("embedding grouping tests passed")

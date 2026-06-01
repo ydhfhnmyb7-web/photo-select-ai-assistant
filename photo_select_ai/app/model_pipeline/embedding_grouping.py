@@ -100,7 +100,8 @@ def group_embeddings(
         group_id = f"auto_{group_number:03d}"
         group_number += 1
         ranked = _rank_group(indexes, items, nearest_similarity)
-        stats = _group_similarity_stats(indexes, similarity_matrix)
+        stats_matrix = raw_similarity_matrix if grouping_strategy == GROUPING_SEQUENCE_CONSTRAINED else similarity_matrix
+        stats = _group_similarity_stats(indexes, stats_matrix)
         high_risk = _is_high_risk_overmerge(
             size=len(indexes),
             min_similarity=stats["min"],
@@ -305,23 +306,78 @@ def _sequence_constrained_clusters(
     clusters = [sorted(values, key=lambda index: index_to_pos.get(index, index)) for values in clusters_by_root.values()]
 
     split_clusters: list[list[int]] = []
-    index_to_tuple = {index: value for value in indexed for index in [value[0]]}
     for cluster in clusters:
-        stats = _group_similarity_stats(cluster, raw_similarity_matrix)
-        if not _is_high_risk_overmerge(len(cluster), stats["min"], max_group_size, group_min_similarity_threshold):
-            split_clusters.append(sorted(cluster))
-            continue
-        subset = [index_to_tuple[index] for index in cluster if index in index_to_tuple]
         split_clusters.extend(
-            _greedy_linkage_clusters(
-                indexed=subset,
+            _enforce_final_cluster_constraints(
+                cluster=cluster,
+                indexed=indexed,
                 similarity_matrix=raw_similarity_matrix,
-                threshold=group_min_similarity_threshold,
+                threshold=max(threshold, group_min_similarity_threshold),
                 group_min_similarity_threshold=group_min_similarity_threshold,
-                strategy=GROUPING_COMPLETE_LINKAGE,
+                max_group_size=max_group_size,
             )
         )
     return [sorted(values) for values in split_clusters]
+
+
+def _enforce_final_cluster_constraints(
+    cluster: list[int],
+    indexed: list[tuple[int, PhotoItem, EmbeddingResult, np.ndarray]],
+    similarity_matrix: dict[tuple[int, int], float],
+    threshold: float,
+    group_min_similarity_threshold: float,
+    max_group_size: int,
+) -> list[list[int]]:
+    """Return only safe sequence groups, splitting unsafe groups to singletons if needed."""
+    cluster = sorted(cluster)
+    if len(cluster) <= 1:
+        return [cluster]
+
+    stats = _group_similarity_stats(cluster, similarity_matrix)
+    if not _is_high_risk_overmerge(len(cluster), stats["min"], max_group_size, group_min_similarity_threshold):
+        return [cluster]
+    if len(cluster) == 2:
+        return [[index] for index in cluster]
+
+    index_to_tuple = {index: value for value in indexed for index in [value[0]]}
+    subset = [index_to_tuple[index] for index in cluster if index in index_to_tuple]
+    split = _greedy_linkage_clusters(
+        indexed=subset,
+        similarity_matrix=similarity_matrix,
+        threshold=threshold,
+        group_min_similarity_threshold=group_min_similarity_threshold,
+        strategy=GROUPING_COMPLETE_LINKAGE,
+    )
+    if len(split) == 1 and set(split[0]) == set(cluster):
+        if len(cluster) > max_group_size:
+            safe_chunks: list[list[int]] = []
+            for chunk in (cluster[start : start + max_group_size] for start in range(0, len(cluster), max_group_size)):
+                safe_chunks.extend(
+                    _enforce_final_cluster_constraints(
+                        cluster=chunk,
+                        indexed=indexed,
+                        similarity_matrix=similarity_matrix,
+                        threshold=threshold,
+                        group_min_similarity_threshold=group_min_similarity_threshold,
+                        max_group_size=max_group_size,
+                    )
+                )
+            return safe_chunks
+        return [[index] for index in cluster]
+
+    safe: list[list[int]] = []
+    for part in split:
+        safe.extend(
+            _enforce_final_cluster_constraints(
+                cluster=part,
+                indexed=indexed,
+                similarity_matrix=similarity_matrix,
+                threshold=threshold,
+                group_min_similarity_threshold=group_min_similarity_threshold,
+                max_group_size=max_group_size,
+            )
+        )
+    return safe
 
 
 def _split_high_risk_clusters(
