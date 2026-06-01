@@ -31,6 +31,19 @@ LOW_CONFIDENCE_GROUP_THRESHOLD = 0.74
 
 
 @dataclass
+class PairDiagnostic:
+    file_a: str
+    file_b: str
+    manual_same_group: bool
+    predicted_same_group: bool
+    error_type: str
+    similarity: float = 0.0
+    predicted_group: str = ""
+    manual_group_a: str = ""
+    manual_group_b: str = ""
+
+
+@dataclass
 class PairEvaluation:
     pair_precision: float = 0.0
     pair_recall: float = 0.0
@@ -38,8 +51,11 @@ class PairEvaluation:
     true_positive_pairs: int = 0
     false_positive_pairs: int = 0
     false_negative_pairs: int = 0
+    predicted_pair_count: int = 0
+    manual_pair_count: int = 0
     over_merge_count: int = 0
     over_split_count: int = 0
+    pair_diagnostics: list[PairDiagnostic] = field(default_factory=list)
 
 
 @dataclass
@@ -82,6 +98,7 @@ class ThresholdSweepResult:
 class SmokeTestResult:
     report_path: Path
     csv_path: Path
+    pair_diagnostics_path: Path | None
     backend_requested: str
     backend_used: str
     device: str
@@ -117,6 +134,7 @@ def run_model_pipeline_smoke(
     output_path = Path(output_report) if output_report else input_path / "model_pipeline_smoke_report.md"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path = output_path.with_suffix(".csv")
+    pair_diagnostics_path = output_path.with_name(f"{output_path.stem}_manual_pairs.csv") if manual_groups_csv else None
 
     config = AppConfig(
         embedding_backend=backend,
@@ -188,9 +206,14 @@ def run_model_pipeline_smoke(
         manual_groups_path=Path(manual_groups_csv) if manual_groups_csv else None,
     )
     write_smoke_csv(csv_path, items, manual_groups)
+    if pair_diagnostics_path:
+        primary_result = _find_threshold_result(threshold_results, config.embedding_similarity_threshold)
+        diagnostics = primary_result.evaluation.pair_diagnostics if primary_result and primary_result.evaluation else []
+        write_pair_diagnostics_csv(pair_diagnostics_path, diagnostics)
     return SmokeTestResult(
         report_path=output_path,
         csv_path=csv_path,
+        pair_diagnostics_path=pair_diagnostics_path,
         backend_requested=backend,
         backend_used=_backend_label(pipeline.method),
         device=_device_label(extractor, runtime),
@@ -340,7 +363,12 @@ def build_threshold_result(
     ungrouped_files = [item.filename for item in items if item.filename not in grouped_files]
     singleton_count = len(ungrouped_files)
     group_sizes = [group.size for group in groups]
-    evaluation = evaluate_pair_groups([item.filename for item in items], grouped_by_id, manual_groups) if manual_groups else None
+    similarity_lookup = _pair_similarity_lookup(items, embedding_map)
+    evaluation = (
+        evaluate_pair_groups([item.filename for item in items], grouped_by_id, manual_groups, similarity_lookup)
+        if manual_groups
+        else None
+    )
     near_miss_pairs = find_near_miss_pairs(items, embedding_map, grouping, threshold)
     return ThresholdSweepResult(
         threshold=threshold,
@@ -364,7 +392,9 @@ def evaluate_pair_groups(
     file_names: Sequence[str],
     grouped_by_id: dict[str, list[PhotoItem]],
     manual_groups: dict[str, str],
+    similarity_lookup: dict[tuple[str, str], float] | None = None,
 ) -> PairEvaluation:
+    similarity_lookup = similarity_lookup or {}
     considered = [file_name for file_name in file_names if manual_groups.get(file_name)]
     predicted_group: dict[str, str] = {file_name: f"single:{file_name}" for file_name in considered}
     for group_id, items in grouped_by_id.items():
@@ -373,15 +403,38 @@ def evaluate_pair_groups(
                 predicted_group[item.filename] = group_id
 
     tp = fp = fn = 0
+    diagnostics: list[PairDiagnostic] = []
     for left, right in combinations(considered, 2):
         manual_same = manual_groups[left] == manual_groups[right]
         predicted_same = predicted_group[left] == predicted_group[right] and not predicted_group[left].startswith("single:")
+        error_type = "TN"
         if predicted_same and manual_same:
             tp += 1
+            error_type = "TP"
         elif predicted_same and not manual_same:
             fp += 1
+            error_type = "FP"
         elif manual_same and not predicted_same:
             fn += 1
+            error_type = "FN"
+        predicted_label = (
+            predicted_group[left]
+            if predicted_group[left] == predicted_group[right]
+            else f"{_display_group(predicted_group[left])};{_display_group(predicted_group[right])}"
+        )
+        diagnostics.append(
+            PairDiagnostic(
+                file_a=left,
+                file_b=right,
+                manual_same_group=manual_same,
+                predicted_same_group=predicted_same,
+                error_type=error_type,
+                similarity=round(_lookup_pair_similarity(similarity_lookup, left, right), 4),
+                predicted_group=_display_group(predicted_label),
+                manual_group_a=manual_groups[left],
+                manual_group_b=manual_groups[right],
+            )
+        )
 
     precision = tp / (tp + fp) if tp + fp else 0.0
     recall = tp / (tp + fn) if tp + fn else 0.0
@@ -411,8 +464,11 @@ def evaluate_pair_groups(
         true_positive_pairs=tp,
         false_positive_pairs=fp,
         false_negative_pairs=fn,
+        predicted_pair_count=tp + fp,
+        manual_pair_count=tp + fn,
         over_merge_count=over_merge,
         over_split_count=over_split,
+        pair_diagnostics=diagnostics,
     )
 
 
@@ -619,10 +675,18 @@ def write_smoke_markdown(
                     f"- true positive pairs：{eval_result.true_positive_pairs}",
                     f"- false positive pairs：{eval_result.false_positive_pairs}",
                     f"- false negative pairs：{eval_result.false_negative_pairs}",
+                    f"- predicted pair count：{eval_result.predicted_pair_count}",
+                    f"- manual pair count：{eval_result.manual_pair_count}",
                     f"- over_merge 数量：{eval_result.over_merge_count}",
                     f"- over_split 数量：{eval_result.over_split_count}",
                 ]
             )
+            false_positive_examples = [value for value in eval_result.pair_diagnostics if value.error_type == "FP"][:30]
+            false_negative_examples = [value for value in eval_result.pair_diagnostics if value.error_type == "FN"][:30]
+            lines.extend(["", "### AI 错误合并示例（False Positive Pairs，最多 30 对）"])
+            _append_pair_diagnostic_table(lines, false_positive_examples)
+            lines.extend(["", "### AI 漏掉的同组示例（False Negative Pairs，最多 30 对）"])
+            _append_pair_diagnostic_table(lines, false_negative_examples)
 
     lines.extend(["", "## Per Photo"])
     for item in items:
@@ -676,6 +740,54 @@ def write_smoke_csv(csv_path: Path, items: list[PhotoItem], manual_groups: dict[
                     "embedding_cache_key": item.embedding_cache_key,
                 }
             )
+
+
+def write_pair_diagnostics_csv(csv_path: Path, diagnostics: Sequence[PairDiagnostic]) -> None:
+    fields = [
+        "file_a",
+        "file_b",
+        "manual_same_group",
+        "predicted_same_group",
+        "error_type",
+        "similarity",
+        "predicted_group",
+        "manual_group_a",
+        "manual_group_b",
+    ]
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        for item in diagnostics:
+            writer.writerow(
+                {
+                    "file_a": item.file_a,
+                    "file_b": item.file_b,
+                    "manual_same_group": item.manual_same_group,
+                    "predicted_same_group": item.predicted_same_group,
+                    "error_type": item.error_type,
+                    "similarity": f"{item.similarity:.4f}",
+                    "predicted_group": item.predicted_group,
+                    "manual_group_a": item.manual_group_a,
+                    "manual_group_b": item.manual_group_b,
+                }
+            )
+
+
+def _append_pair_diagnostic_table(lines: list[str], diagnostics: Sequence[PairDiagnostic]) -> None:
+    if not diagnostics:
+        lines.append("暂无。")
+        return
+    lines.extend(
+        [
+            "| file_a | file_b | predicted_group | manual_group_a | manual_group_b | similarity |",
+            "|---|---|---|---|---|---:|",
+        ]
+    )
+    for item in diagnostics:
+        lines.append(
+            f"| {item.file_a} | {item.file_b} | {item.predicted_group or '-'} | "
+            f"{item.manual_group_a or '-'} | {item.manual_group_b or '-'} | {item.similarity:.4f} |"
+        )
 
 
 def _build_smoke_extractor(config: AppConfig, runtime: RuntimeInfo) -> tuple[EmbeddingExtractor, list[str]]:
@@ -759,6 +871,22 @@ def _pair_similarities(items: Sequence[PhotoItem], embedding_map: dict[Path, np.
     return values
 
 
+def _pair_similarity_lookup(items: Sequence[PhotoItem], embedding_map: dict[Path, np.ndarray]) -> dict[tuple[str, str], float]:
+    lookup: dict[tuple[str, str], float] = {}
+    for left, right in combinations(items, 2):
+        key = tuple(sorted((left.filename, right.filename)))
+        lookup[key] = _cosine_for_items(left, right, embedding_map)
+    return lookup
+
+
+def _lookup_pair_similarity(lookup: dict[tuple[str, str], float], left: str, right: str) -> float:
+    return float(lookup.get(tuple(sorted((left, right))), 0.0))
+
+
+def _display_group(group_id: str) -> str:
+    return "-" if group_id.startswith("single:") else group_id
+
+
 def _cosine_for_items(left: PhotoItem, right: PhotoItem, embedding_map: dict[Path, np.ndarray]) -> float:
     left_vector = embedding_map.get(Path(left.path))
     right_vector = embedding_map.get(Path(right.path))
@@ -786,6 +914,7 @@ def result_to_json(result: SmokeTestResult) -> str:
         {
             "report_path": str(result.report_path),
             "csv_path": str(result.csv_path),
+            "pair_diagnostics_path": str(result.pair_diagnostics_path) if result.pair_diagnostics_path else "",
             "backend_requested": result.backend_requested,
             "backend_used": result.backend_used,
             "device": result.device,
@@ -810,7 +939,14 @@ def result_to_json(result: SmokeTestResult) -> str:
                     "worst_group_min_similarity": threshold.worst_group_min_similarity,
                     "low_confidence_group_count": threshold.low_confidence_group_count,
                     "high_risk_group_count": threshold.high_risk_group_count,
+                    "pair_precision": threshold.evaluation.pair_precision if threshold.evaluation else None,
+                    "pair_recall": threshold.evaluation.pair_recall if threshold.evaluation else None,
                     "pair_f1": threshold.evaluation.pair_f1 if threshold.evaluation else None,
+                    "true_positive_pairs": threshold.evaluation.true_positive_pairs if threshold.evaluation else None,
+                    "false_positive_pairs": threshold.evaluation.false_positive_pairs if threshold.evaluation else None,
+                    "false_negative_pairs": threshold.evaluation.false_negative_pairs if threshold.evaluation else None,
+                    "predicted_pair_count": threshold.evaluation.predicted_pair_count if threshold.evaluation else None,
+                    "manual_pair_count": threshold.evaluation.manual_pair_count if threshold.evaluation else None,
                 }
                 for threshold in result.threshold_results
             ],

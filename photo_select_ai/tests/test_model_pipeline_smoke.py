@@ -45,6 +45,8 @@ def test_smoke_test_mock_backend_writes_reports() -> None:
         assert len(result.pipeline.grouping.groups) == 1
         assert report.exists()
         assert report.with_suffix(".csv").exists()
+        assert result.pair_diagnostics_path is None
+        assert not report.with_name("smoke_manual_pairs.csv").exists()
         text = report.read_text(encoding="utf-8-sig")
         assert "backend 实际：`mock`" in text
         assert "same_1.jpg" in text
@@ -180,11 +182,53 @@ def test_pair_metrics_are_calculated_correctly() -> None:
     assert metrics.true_positive_pairs == 1
     assert metrics.false_positive_pairs == 1
     assert metrics.false_negative_pairs == 0
+    assert metrics.predicted_pair_count == 2
+    assert metrics.manual_pair_count == 1
     assert metrics.pair_precision == 0.5
     assert metrics.pair_recall == 1.0
     assert round(metrics.pair_f1, 4) == 0.6667
     assert metrics.over_merge_count == 1
     assert metrics.over_split_count == 0
+    assert [item.error_type for item in metrics.pair_diagnostics].count("FP") == 1
+
+
+def test_pair_diagnostics_include_false_positive_and_false_negative() -> None:
+    class _Item:
+        def __init__(self, filename: str):
+            self.filename = filename
+
+    grouped_by_id = {
+        "auto_001": [_Item("001.jpg"), _Item("003.jpg")],
+    }
+    manual_groups = {
+        "001.jpg": "A",
+        "002.jpg": "A",
+        "003.jpg": "B",
+    }
+    metrics = evaluate_pair_groups(
+        ["001.jpg", "002.jpg", "003.jpg"],
+        grouped_by_id,
+        manual_groups,
+        {
+            ("001.jpg", "002.jpg"): 0.91,
+            ("001.jpg", "003.jpg"): 0.97,
+            ("002.jpg", "003.jpg"): 0.41,
+        },
+    )
+
+    assert metrics.pair_precision == 0.0
+    assert metrics.pair_recall == 0.0
+    assert metrics.pair_f1 == 0.0
+    assert metrics.false_positive_pairs == 1
+    assert metrics.false_negative_pairs == 1
+    fp = [item for item in metrics.pair_diagnostics if item.error_type == "FP"]
+    fn = [item for item in metrics.pair_diagnostics if item.error_type == "FN"]
+    assert fp[0].file_a == "001.jpg"
+    assert fp[0].file_b == "003.jpg"
+    assert fp[0].similarity == 0.97
+    assert fn[0].file_a == "001.jpg"
+    assert fn[0].file_b == "002.jpg"
+    assert fn[0].similarity == 0.91
 
 
 def test_smoke_test_with_manual_groups_computes_metrics() -> None:
@@ -215,6 +259,13 @@ def test_smoke_test_with_manual_groups_computes_metrics() -> None:
 
         assert result.threshold_results[0].evaluation is not None
         assert result.threshold_results[0].evaluation.pair_f1 == 1.0
+        assert result.threshold_results[0].evaluation.predicted_pair_count == 3
+        assert result.threshold_results[0].evaluation.manual_pair_count == 3
+        assert result.pair_diagnostics_path is not None
+        assert result.pair_diagnostics_path.exists()
+        diagnostics = result.pair_diagnostics_path.read_text(encoding="utf-8-sig")
+        assert "file_a,file_b,manual_same_group,predicted_same_group,error_type" in diagnostics
+        assert "TP" in diagnostics
         assert result.recommended_threshold in {0.78, 0.86, 0.94}
         assert "人工标注评估" in report.read_text(encoding="utf-8-sig")
     finally:
@@ -228,5 +279,6 @@ if __name__ == "__main__":
     test_threshold_sweep_mock_backend_writes_comparison_report()
     test_manual_group_csv_is_parsed()
     test_pair_metrics_are_calculated_correctly()
+    test_pair_diagnostics_include_false_positive_and_false_negative()
     test_smoke_test_with_manual_groups_computes_metrics()
     print("model pipeline smoke tests passed")
