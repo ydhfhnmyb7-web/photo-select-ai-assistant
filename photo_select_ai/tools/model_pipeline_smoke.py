@@ -14,7 +14,7 @@ def main() -> int:
     parser.add_argument("input_dir", help="Photo directory")
     parser.add_argument("--backend", choices=["auto", "openclip", "fallback", "mock"], default="auto")
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--similarity-threshold", type=float, default=0.86)
+    parser.add_argument("--similarity-threshold", type=float, default=0.94)
     parser.add_argument(
         "--grouping-strategy",
         choices=["connected_components", "complete_linkage", "average_linkage", "sequence_constrained"],
@@ -29,7 +29,7 @@ def main() -> int:
     parser.add_argument(
         "--threshold-sweep",
         default="",
-        help="Comma-separated thresholds, e.g. 0.78,0.82,0.86,0.90,0.94",
+        help="Comma-separated thresholds, e.g. 0.86,0.90,0.94,0.96",
     )
     parser.add_argument("--manual-groups-csv", default="", help="Optional CSV with columns: file_name,manual_group")
     parser.add_argument("--force-refresh-cache", action="store_true")

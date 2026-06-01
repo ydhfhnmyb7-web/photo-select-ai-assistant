@@ -63,7 +63,7 @@ class AppConfig:
     embedding_model_version: str = "v1"
     embedding_device: str = "auto"
     embedding_batch_size: int = 16
-    embedding_similarity_threshold: float = 0.86
+    embedding_similarity_threshold: float = 0.94
     embedding_group_min_size: int = 2
     grouping_method: str = "embedding"
     grouping_strategy: str = "complete_linkage"

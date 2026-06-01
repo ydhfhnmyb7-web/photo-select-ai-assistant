@@ -99,7 +99,7 @@ def run_model_pipeline_smoke(
     input_dir: Path | str,
     backend: str = "auto",
     batch_size: int = 16,
-    similarity_threshold: float = 0.86,
+    similarity_threshold: float = 0.94,
     force_refresh_cache: bool = False,
     output_report: Path | str | None = None,
     max_photos: int | None = None,
@@ -468,7 +468,7 @@ def recommend_threshold(results: Sequence[ThresholdSweepResult], has_manual_grou
             - result.low_confidence_group_count * 0.9
             - len(result.suspected_over_merged_groups) * 1.4
             - too_large_penalty
-            - abs(result.threshold - 0.86) * 0.6
+            - abs(result.threshold - 0.94) * 0.6
             + near_miss_bonus
         )
 
