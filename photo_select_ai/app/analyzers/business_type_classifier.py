@@ -10,6 +10,29 @@ from app.analyzers.analyzer_result import AnalyzerResult
 from app.core.review_config import get_subtypes
 
 
+TYPE_WEDDING = "婚纱写真"
+TYPE_PORTRAIT = "个人写真"
+TYPE_COUPLE = "情侣/双人写真"
+TYPE_FAMILY = "家庭合影"
+TYPE_BUSINESS = "商务形象照"
+TYPE_EVENT = "会议/活动照"
+TYPE_ID = "证件/登记照"
+TYPE_UNKNOWN = "无法判断"
+
+BUSINESS_SUBTYPES = {
+    TYPE_WEDDING: ["主纱", "棚内婚纱", "外景婚纱", "单人新娘", "单人新郎", "双人互动", "标准客片"],
+    TYPE_PORTRAIT: ["棚拍写真", "外景写真", "职业形象", "氛围感人像", "半身", "全身", "特写"],
+    TYPE_COUPLE: ["情侣", "双人互动", "双人合影", "未细分"],
+    TYPE_FAMILY: ["三口之家", "多人家庭", "正式合影", "生活感合影", "未细分"],
+    TYPE_BUSINESS: ["单人商务形象", "职业形象", "团队形象", "未细分"],
+    TYPE_EVENT: ["会议合影", "领导讲话", "现场纪实", "签约仪式", "团队合影", "花絮"],
+    TYPE_ID: ["白底", "蓝底", "红底", "一寸", "二寸", "登记照", "职业证件照"],
+    TYPE_UNKNOWN: ["未细分"],
+}
+
+CONFIDENCE_THRESHOLD = 0.65
+
+
 def classify_business_type(image_path: Path | str, face_result: AnalyzerResult | None = None) -> AnalyzerResult:
     path = Path(image_path)
     face_raw = face_result.raw_data or {} if face_result else {}
@@ -19,15 +42,15 @@ def classify_business_type(image_path: Path | str, face_result: AnalyzerResult |
         evidence = _extract_visual_evidence(image, face_raw)
 
     photo_type, subtype, confidence, reason, tags, problems = _classify_from_evidence(evidence)
-    if confidence < 0.65:
+    if confidence < CONFIDENCE_THRESHOLD:
         candidate_type = photo_type
         candidate_subtype = subtype
         weak_reason = reason
-        photo_type = "无法判断"
+        photo_type = TYPE_UNKNOWN
         subtype = "未细分"
         problems = _dedupe([*problems, "建议人工确认"])
         reason = "业务类型置信度较低，建议人工确认。"
-        if candidate_type and candidate_type != "无法判断":
+        if candidate_type and candidate_type != TYPE_UNKNOWN:
             reason += f" 较弱倾向：{candidate_type} / {candidate_subtype}。{weak_reason}"
         evidence["candidate_photo_type"] = candidate_type
         evidence["candidate_subtype"] = candidate_subtype
@@ -58,6 +81,7 @@ def _extract_visual_evidence(image: Image.Image, face_raw: dict[str, Any]) -> di
     blue_ratio = float(((rgb[:, :, 2] > rgb[:, :, 0] + 18) & (rgb[:, :, 2] > rgb[:, :, 1] + 8)).mean())
     face_count = _safe_int(face_raw.get("face_count"), 0)
     person_count = _safe_int(face_raw.get("person_count") or face_raw.get("detected_person_count"), face_count)
+    prop_hint = str(face_raw.get("prop_hint") or face_raw.get("props_hint") or "")
     main_face_box = face_raw.get("main_face_box") or []
     face_area_ratio = float(face_raw.get("face_area_ratio") or 0.0)
     if not face_area_ratio and len(main_face_box) == 4:
@@ -70,6 +94,7 @@ def _extract_visual_evidence(image: Image.Image, face_raw: dict[str, Any]) -> di
     background_hint = str(face_raw.get("background_hint") or _background_hint(dominant, color_std, green_ratio, blue_ratio))
     clothing_hint = str(face_raw.get("clothing_hint") or _clothing_hint(white_ratio, lower_white_ratio, center_white_ratio, color_std, background_hint))
     scene_hint = str(face_raw.get("scene_hint") or _scene_hint(background_hint, color_std, green_ratio, blue_ratio))
+    meeting_evidence = _meeting_evidence(face_raw, scene_hint, background_hint)
     orientation = "竖图" if height >= width else "横图"
     return {
         "face_count": face_count,
@@ -78,7 +103,9 @@ def _extract_visual_evidence(image: Image.Image, face_raw: dict[str, Any]) -> di
         "is_multi_person": person_count >= 3 or face_count >= 3,
         "scene_hint": scene_hint,
         "clothing_hint": clothing_hint,
+        "prop_hint": prop_hint,
         "background_hint": background_hint,
+        "meeting_evidence": meeting_evidence,
         "image_orientation": orientation,
         "full_body_or_half_body": full_body_or_half_body,
         "dominant_color": dominant,
@@ -94,26 +121,31 @@ def _classify_from_evidence(evidence: dict[str, Any]) -> tuple[str, str, float, 
     person_count = _safe_int(evidence.get("person_count"), face_count)
     scene_hint = str(evidence.get("scene_hint") or "未知")
     clothing_hint = str(evidence.get("clothing_hint") or "未知")
+    prop_hint = str(evidence.get("prop_hint") or "")
     background_hint = str(evidence.get("background_hint") or "未知")
+    meeting_evidence = bool(evidence.get("meeting_evidence"))
     body_scale = str(evidence.get("full_body_or_half_body") or "未知")
     tags = [
         f"人数线索：{person_count or face_count}",
         f"场景线索：{scene_hint}",
         f"服装线索：{clothing_hint}",
+        f"道具线索：{prop_hint or '未知'}",
         f"背景线索：{background_hint}",
     ]
     problems: list[str] = []
 
     single_or_double = (0 < person_count <= 2) or (0 < face_count <= 2)
-    strong_wedding = clothing_hint == "婚纱" and single_or_double
+    studio_like = scene_hint == "棚拍" or background_hint == "棚拍背景"
+    wedding_hint = clothing_hint in {"婚纱", "白纱", "礼服"} or prop_hint in {"花束", "头纱", "皇冠", "新娘造型"}
+    strong_wedding = wedding_hint and single_or_double
     studio_wedding = strong_wedding and scene_hint == "棚拍" and body_scale in {"全身", "半身", "未知"}
     if strong_wedding:
-        photo_type = "婚纱照"
+        photo_type = TYPE_WEDDING
         subtype = _first_valid_subtype(photo_type, "单人新娘" if person_count <= 1 or face_count <= 1 else "双人互动")
         if studio_wedding:
             subtype = _first_valid_subtype(photo_type, "单人新娘" if person_count <= 1 or face_count <= 1 else "棚内婚纱")
         confidence = 0.78 if studio_wedding else 0.70
-        reason = "检测到单人/双人主体与明显白纱、大裙摆或新娘造型线索，优先按婚纱照建议。"
+        reason = "检测到单人/双人主体与白纱、花束、头纱或新娘造型等影楼婚纱线索，优先按婚纱写真建议。"
         return photo_type, subtype, confidence, reason, tags + ["婚纱优先"], problems
 
     if face_count <= 0 and person_count <= 0:
@@ -125,42 +157,69 @@ def _classify_from_evidence(evidence: dict[str, Any]) -> tuple[str, str, float, 
 
     if face_count <= 1 or person_count <= 1:
         if _is_id_background(tuple(evidence.get("dominant_color") or (0, 0, 0)), float(evidence.get("color_std") or 0)) and body_scale in {"特写", "半身", "未知"}:
-            photo_type = "证件照"
+            photo_type = TYPE_ID
             subtype = _id_subtype(tuple(evidence.get("dominant_color") or (255, 255, 255)))
             confidence = 0.68
-            reason = "单人主体且背景较纯，按证件照建议。"
+            reason = "单人主体且背景较纯，按证件/登记照建议。"
             return photo_type, subtype, confidence, reason, tags, problems
-        photo_type = "个人写真"
+        if clothing_hint in {"西装", "商务服装"} and studio_like:
+            photo_type = TYPE_BUSINESS
+            subtype = _first_valid_subtype(photo_type, "单人商务形象")
+            confidence = 0.68
+            reason = "检测到单人西装或商务服装的棚拍形象照线索；单人棚拍不应归为会议/活动照。"
+            return photo_type, subtype, confidence, reason, tags + ["单人商务形象"], problems
+        photo_type = TYPE_PORTRAIT
         subtype = _first_valid_subtype(photo_type, "棚拍写真" if scene_hint == "棚拍" else "半身")
-        confidence = 0.58
+        confidence = 0.62 if studio_like else 0.58
         reason = "检测到单人主体；单人照片禁止输出全家福、会议合影或团队合影，建议人工确认具体类型。"
         return photo_type, subtype, confidence, reason, tags + ["单人硬约束"], problems
 
     if face_count == 2 or person_count == 2:
-        photo_type = "情侣照"
+        if wedding_hint:
+            photo_type = TYPE_WEDDING
+            subtype = _first_valid_subtype(photo_type, "双人互动")
+            confidence = 0.72
+            reason = "检测到双人主体与婚纱/礼服/花束线索，优先按双人婚纱写真建议。"
+            return photo_type, subtype, confidence, reason, tags + ["双人婚纱优先"], problems
+        photo_type = TYPE_COUPLE
         subtype = _first_valid_subtype(photo_type, "未细分")
-        confidence = 0.56
-        reason = "检测到双人主体，不判全家福；可按情侣照/双人合影低置信候选，建议人工确认。"
+        confidence = 0.62 if studio_like else 0.56
+        reason = "检测到双人主体，不判全家福或会议；可按情侣/双人写真低置信候选，建议人工确认。"
         return photo_type, subtype, confidence, reason, tags + ["双人硬约束"], problems
 
     if face_count >= 6 or person_count >= 6:
-        photo_type = "会议/活动照" if scene_hint in {"会议", "棚拍", "未知"} else "全家福"
-        subtype = _first_valid_subtype(photo_type, "会议合影" if photo_type == "会议/活动照" else "正式合影")
-        confidence = 0.66 if photo_type == "会议/活动照" else 0.60
-        reason = "检测到多人主体；只有多人数量满足条件时才允许会议/全家福候选。"
+        if meeting_evidence:
+            photo_type = TYPE_EVENT
+            subtype = _first_valid_subtype(photo_type, "会议合影")
+            confidence = 0.72
+            reason = "检测到多人主体且存在会议室、讲台、横幅、桌牌或活动现场等明确会议/活动证据。"
+            return photo_type, subtype, confidence, reason, tags + ["会议证据"], problems
+        photo_type = TYPE_FAMILY
+        subtype = _first_valid_subtype(photo_type, "多人家庭")
+        confidence = 0.58
+        reason = "检测到多人主体，但缺少明确会议/活动场景证据；不强行归为会议/活动照。"
         return photo_type, subtype, confidence, reason, tags + ["多人候选"], problems
 
     if face_count >= 3 or person_count >= 3:
-        photo_type = "全家福"
+        if meeting_evidence:
+            photo_type = TYPE_EVENT
+            subtype = _first_valid_subtype(photo_type, "现场纪实")
+            confidence = 0.66
+            reason = "检测到多人主体和明确会议/活动场景线索，作为会议/活动照候选。"
+            return photo_type, subtype, confidence, reason, tags + ["会议证据"], problems
+        photo_type = TYPE_FAMILY
         subtype = _first_valid_subtype(photo_type, "多人家庭")
         confidence = 0.58
         reason = "检测到 3 人以上主体，但关系与场景证据不足，不能强行判定全家福。"
         return photo_type, subtype, confidence, reason, tags + ["多人低置信候选"], problems
 
-    return "无法判断", "未细分", 0.25, "业务类型证据不足，建议人工确认。", tags, ["建议人工确认"]
+    return TYPE_UNKNOWN, "未细分", 0.25, "业务类型证据不足，建议人工确认。", tags, ["建议人工确认"]
 
 
 def _first_valid_subtype(photo_type: str, preferred: str) -> str:
+    business_subtypes = BUSINESS_SUBTYPES.get(photo_type)
+    if business_subtypes:
+        return preferred if preferred in business_subtypes else business_subtypes[0]
     subtypes = get_subtypes(photo_type)
     if preferred in subtypes:
         return preferred
@@ -208,6 +267,27 @@ def _scene_hint(background_hint: str, color_std: float, green_ratio: float, blue
     if color_std > 112:
         return "会议"
     return "未知"
+
+
+def _meeting_evidence(face_raw: dict[str, Any], scene_hint: str, background_hint: str) -> bool:
+    if background_hint in {"棚拍背景", "白底", "蓝底", "红底"}:
+        return False
+    explicit_keys = {
+        "meeting_evidence",
+        "meeting_room",
+        "conference_room",
+        "has_stage",
+        "has_banner",
+        "has_table",
+        "has_nameplate",
+        "event_scene",
+    }
+    if any(bool(face_raw.get(key)) for key in explicit_keys):
+        return True
+    raw_scene = str(face_raw.get("scene_hint") or "")
+    raw_background = str(face_raw.get("background_hint") or "")
+    meeting_words = ("会议", "活动", "讲台", "横幅", "桌牌", "会场", "签约", "发布会")
+    return any(word in raw_scene or word in raw_background for word in meeting_words) and scene_hint == "会议"
 
 
 def _body_scale_from_face(face_area_ratio: float) -> str:

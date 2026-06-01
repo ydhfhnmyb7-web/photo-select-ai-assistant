@@ -122,11 +122,12 @@ def compact_ai_suggestion_text(analysis: dict | str | None) -> str:
     if not decision:
         return "暂无 AI 建议，请先运行 AI 预分析或手动筛片。"
     return (
-        f"AI推荐照片类型：{decision.get('photo_type') or '-'}\n"
-        f"AI推荐细分类别：{decision.get('subtype') or '-'}\n"
-        f"AI推荐品质等级：{decision.get('quality_rating') or '-'}\n"
-        f"AI推荐交付用途：{'、'.join(decision.get('delivery_use') or []) or '-'}\n"
-        f"AI推荐问题标签：{'、'.join(decision.get('issue_tags') or []) or '-'}\n"
+        "AI建议，仅供参考；置信度不足时请人工确认。\n"
+        f"建议照片类型：{decision.get('photo_type') or '-'}\n"
+        f"建议细分类别：{decision.get('subtype') or '-'}\n"
+        f"建议品质等级：{decision.get('quality_rating') or '-'}\n"
+        f"建议交付用途：{'、'.join(decision.get('delivery_use') or []) or '-'}\n"
+        f"建议问题标签：{'、'.join(decision.get('issue_tags') or []) or '-'}\n"
         f"置信度：{decision.get('confidence') or '-'}\n"
         f"简短理由：{decision.get('reason') or '-'}"
     )
