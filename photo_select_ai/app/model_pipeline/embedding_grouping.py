@@ -555,6 +555,6 @@ def _reason_for(
     backend = "fallback aHash/color" if method == "ahash_fallback" else "visual embedding"
     risk = " High-risk over-merge; please review manually." if high_risk else ""
     return (
-        f"Auto grouped into {group_id} by {backend} with {grouping_strategy}; "
+        f"Suggested AI similar candidate group {group_id} by {backend} with {grouping_strategy}; "
         f"group size {size}, rank {rank}/{size}, confidence {confidence:.2f}.{risk}"
     )

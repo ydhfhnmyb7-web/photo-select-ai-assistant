@@ -58,6 +58,7 @@ from app.core.background_task_manager import (
     TASK_EXPORT_PREVIEW,
     TASK_EXPRESSION_ANALYSIS,
     TASK_FACE_QUALITY,
+    TASK_MODEL_AUTO_GROUP,
     TASK_NAMES,
     TASK_POSE_ANALYSIS,
     TASK_PREFERENCE_STATS,
@@ -1332,6 +1333,7 @@ class MainWindow(QMainWindow):
         task_types = [
             TASK_THUMBNAIL_CACHE,
             TASK_SIMILAR_PHOTOS,
+            TASK_MODEL_AUTO_GROUP,
             TASK_AI_PRECLASSIFY,
             TASK_FACE_QUALITY,
             TASK_POSE_ANALYSIS,
@@ -1342,7 +1344,13 @@ class MainWindow(QMainWindow):
         for index, task_type in enumerate(task_types):
             checkbox = QCheckBox(TASK_NAMES[task_type])
             checkbox.setChecked(task_type in default_checked)
-            checkbox.setToolTip("模型类任务当前未接入时会安全跳过，不会崩溃或删除原图。")
+            if task_type == TASK_MODEL_AUTO_GROUP:
+                checkbox.setToolTip(
+                    "使用视觉 embedding 生成 AI 相似候选组，只写 auto_group_* 建议字段；"
+                    "不会删除、移动原图，也不会覆盖人工相似组状态。"
+                )
+            else:
+                checkbox.setToolTip("模型类任务当前未接入时会安全跳过，不会崩溃或删除原图。")
             self.background_task_checkboxes[task_type] = checkbox
             task_grid.addWidget(checkbox, index // 2, index % 2)
         layout.addLayout(task_grid)
@@ -4151,7 +4159,26 @@ class MainWindow(QMainWindow):
         if not task_types:
             QMessageBox.information(self, "后台任务", "请至少勾选一个任务类型。")
             return
-        pending_exists = any(task.status in {TASK_STATUS_PENDING, TASK_STATUS_STOPPED} for task in self.background_task_manager.tasks)
+        pending_task_types = {
+            task.task_type
+            for task in self.background_task_manager.tasks
+            if task.status in {TASK_STATUS_PENDING, TASK_STATUS_STOPPED}
+        }
+        if TASK_MODEL_AUTO_GROUP in set(task_types) | pending_task_types:
+            reply = QMessageBox.question(
+                self,
+                "确认运行 AI 相似候选组",
+                "模型自动分组会生成“AI 相似候选组”建议，用于把画面相似、构图或动作接近、需要互相比较的照片放在一起。\n\n"
+                "这些结果只是建议，人工确认后才可采纳。\n"
+                "本任务不会删除、移动原图，也不会覆盖已有人工相似组状态、组内最佳、人工分类、交付用途、问题标签或审片状态。\n\n"
+                "是否继续运行？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                self.log("已取消 AI 相似候选组任务。")
+                return
+        pending_exists = bool(pending_task_types)
         if not pending_exists:
             self.background_task_manager.add_tasks(build_background_tasks(task_types, self.items))
         started = self.background_task_manager.start(self.items, self.config, self.selected_folder)
@@ -4323,7 +4350,7 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def on_background_task_completed(self, task: BackgroundTask) -> None:
         self._update_background_status(task)
-        if task.task_type in {TASK_THUMBNAIL_CACHE, TASK_SIMILAR_PHOTOS}:
+        if task.task_type in {TASK_THUMBNAIL_CACHE, TASK_SIMILAR_PHOTOS, TASK_MODEL_AUTO_GROUP}:
             self.model.refresh()
         if task.task_type == TASK_SIMILAR_PHOTOS:
             self.refresh_similarity_panel()

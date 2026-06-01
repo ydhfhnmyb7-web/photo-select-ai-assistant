@@ -41,7 +41,7 @@ def test_model_auto_group_task_registered() -> None:
     assert TASK_MODEL_AUTO_GROUP in TASK_NAMES
     tasks = build_background_tasks([TASK_MODEL_AUTO_GROUP], [])
     assert tasks[0].task_type == TASK_MODEL_AUTO_GROUP
-    assert tasks[0].task_name == "模型自动分组 v1"
+    assert tasks[0].task_name == "AI 相似候选组 v1"
 
 
 def test_model_auto_group_task_writes_auto_fields_and_preserves_manual_group_fields() -> None:
@@ -69,13 +69,13 @@ def test_model_auto_group_task_writes_auto_fields_and_preserves_manual_group_fie
 
         assert task.status == TASK_STATUS_COMPLETED
         assert task.success_count == 4
-        assert "分组 1" in task.error_message
+        assert "AI 相似候选组" in task.error_message
         assert items[0].auto_group_id
         assert items[0].auto_group_id == items[1].auto_group_id == items[2].auto_group_id
         assert items[3].auto_group_id == ""
-        assert items[0].grouping_method == "mock_embedding"
-        assert items[0].embedding_model_name == "mock_embedding"
-        assert items[0].embedding_cache_key
+        assert items[0].grouping_method == ""
+        assert items[0].embedding_model_name == ""
+        assert items[0].embedding_cache_key == ""
         assert items[1].similar_group_id == "manual_group"
         assert items[1].similar_group_status == "duplicate"
         assert items[1].best_in_group

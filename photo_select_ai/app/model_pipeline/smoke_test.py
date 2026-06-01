@@ -573,7 +573,7 @@ def write_smoke_markdown(
         f"- cache 命中数：{pipeline.cache_hits}",
         f"- fallback 数：{len(pipeline.embeddings) if pipeline.method == 'ahash_fallback' else 0}",
         f"- skipped 数：{len(pipeline.skipped)}",
-        f"- 当前阈值自动分组数量：{primary_result.group_count if primary_result else len(pipeline.grouping.groups)}",
+        f"- 当前阈值 AI 相似候选组数量：{primary_result.group_count if primary_result else len(pipeline.grouping.groups)}",
         f"- 推荐阈值：{recommended_threshold:.2f}",
         f"- 推荐理由：{recommended_reason}",
         f"- 人工标注 CSV：`{manual_groups_path}`" if manual_groups_path else "- 人工标注 CSV：未提供",
@@ -691,7 +691,7 @@ def write_smoke_markdown(
     lines.extend(["", "## Per Photo"])
     for item in items:
         lines.append(
-            f"- `{item.filename}` | group={item.auto_group_id or '-'} | "
+            f"- `{item.filename}` | AI 相似候选组={item.auto_group_id or '-'} | "
             f"rank={item.auto_group_rank}/{item.auto_group_size} | "
             f"confidence={item.auto_group_confidence:.3f} | method={item.grouping_method or '-'} | "
             f"reason={item.auto_group_reason or '-'}"

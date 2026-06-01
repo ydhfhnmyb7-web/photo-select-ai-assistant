@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import copy
 import traceback
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -30,7 +31,7 @@ TASK_EXPORT = "export"
 TASK_NAMES = {
     TASK_THUMBNAIL_CACHE: "生成缩略图缓存",
     TASK_SIMILAR_PHOTOS: "计算相似照片",
-    TASK_MODEL_AUTO_GROUP: "模型自动分组 v1",
+    TASK_MODEL_AUTO_GROUP: "AI 相似候选组 v1",
     TASK_AI_PRECLASSIFY: "AI预分类",
     TASK_FACE_QUALITY: "人脸质量分析",
     TASK_POSE_ANALYSIS: "肢体姿态分析",
@@ -316,12 +317,16 @@ class BackgroundTaskWorker(QObject):
             self.task_progress.emit(task)
             self.queue_changed.emit(self.tasks)
 
-        result = run_model_pipeline_v1(
-            self.items,
-            config=self.config,
-            progress_callback=progress,
-            cancel_callback=lambda: self._stop_requested,
-        )
+        protected_snapshots = _snapshot_non_auto_group_fields(self.items)
+        try:
+            result = run_model_pipeline_v1(
+                self.items,
+                config=self.config,
+                progress_callback=progress,
+                cancel_callback=lambda: self._stop_requested,
+            )
+        finally:
+            _restore_non_auto_group_fields(self.items, protected_snapshots)
         if task.status == TASK_STATUS_STOPPED:
             return
         grouped_count = sum(1 for item in self.items if item.auto_group_id)
@@ -331,10 +336,10 @@ class BackgroundTaskWorker(QObject):
         task.success_count = len(result.embeddings)
         task.skipped_count = len(result.skipped)
         task.failed_count = 0
-        task.current_file = f"模型自动分组 {len(result.grouping.groups)} 组"
+        task.current_file = f"AI 相似候选组 {len(result.grouping.groups)} 组"
         task.error_message = (
             f"已分析 {len(result.embeddings)}/{len(self.items)}，"
-            f"入组 {grouped_count}，分组 {len(result.grouping.groups)}，"
+            f"AI 相似候选组入组 {grouped_count}，候选组 {len(result.grouping.groups)}，"
             f"fallback {fallback_count}，cache hit {result.cache_hits}，跳过 {len(result.skipped)}"
         )
         self.task_progress.emit(task)
@@ -553,3 +558,23 @@ def _write_background_log(message: str) -> None:
     BACKGROUND_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     line = f"[{_now_text()}] {message}\n"
     BACKGROUND_LOG_PATH.open("a", encoding="utf-8").write(line)
+
+
+def _snapshot_non_auto_group_fields(items: list[PhotoItem]) -> list[dict[str, object]]:
+    allowed_prefix = "auto_group_"
+    snapshots: list[dict[str, object]] = []
+    for item in items:
+        snapshots.append(
+            {
+                field.name: copy.deepcopy(getattr(item, field.name))
+                for field in dataclass_fields(item)
+                if not field.name.startswith(allowed_prefix)
+            }
+        )
+    return snapshots
+
+
+def _restore_non_auto_group_fields(items: list[PhotoItem], snapshots: list[dict[str, object]]) -> None:
+    for item, snapshot in zip(items, snapshots):
+        for key, value in snapshot.items():
+            setattr(item, key, value)
