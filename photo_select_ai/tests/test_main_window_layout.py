@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QFrame, QGroupBox
+from PySide6.QtWidgets import QApplication, QFrame, QGroupBox, QLabel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -32,6 +32,10 @@ def _make_photo(name: str = "a.jpg") -> PhotoItem:
     )
 
 
+def _label_texts(widget) -> list[str]:
+    return [label.text() for label in widget.findChildren(QLabel)]
+
+
 def test_main_window_modular_layout() -> None:
     settings = QSettings("PhotoSelectAI", "PhotoSelectAIAssistant")
     settings.clear()
@@ -53,6 +57,7 @@ def test_main_window_modular_layout() -> None:
         assert window.nav_buttons["ai"].text() == "2. AI分析结果"
         assert window.nav_buttons["review"].text() == "3. 审核与修正"
         assert window.nav_buttons["export"].text() == "4. 导出与整理"
+        assert window.top_settings_button.text() == "设置"
 
         expected_pages = {
             "project": "ProjectImportPage",
@@ -68,10 +73,6 @@ def test_main_window_modular_layout() -> None:
         window._activate_workflow_section("similar", persist=False)
         assert window.current_main_section == "review"
         assert window.review_stack.currentWidget().objectName() == "SimilarGroupPage"
-
-        window._activate_workflow_section("settings", persist=False)
-        assert window.current_main_section == "project"
-        assert window.advanced_settings_group.isChecked()
 
         window._activate_workflow_section("export", persist=True)
         settings.sync()
@@ -102,15 +103,21 @@ def test_project_home_empty_state_and_dashboard_visibility() -> None:
         window._activate_workflow_section("project", persist=False)
         window.update_project_dashboard()
 
-        assert window.project_landing_container is not None
         assert not window.project_landing_container.isHidden()
         assert window.hero_new_project_button.text() == "新建选片项目"
+        assert window.hero_new_project_button.objectName() == "PrimaryButton"
         assert window.hero_open_project_button.text() == "打开已有项目"
         assert window.hero_continue_project_button.text() == "继续上次项目"
+        assert "PhotoSelect AI Assistant" in _label_texts(window.project_landing_container)
+        assert "导入照片" in _label_texts(window.project_landing_container)
+        assert "AI 分析" in _label_texts(window.project_landing_container)
+        assert "人工审核与导出" in _label_texts(window.project_landing_container)
         assert window.project_dashboard_card.isHidden()
         assert window.project_setup_group.isHidden()
         assert window.project_import_card.isHidden()
-        assert window.next_step_button.text() == "新建选片项目"
+        assert window.advanced_settings_group.isHidden()
+        assert not window.advanced_settings_widget.isVisible()
+        assert all(widget.isHidden() for widget in window.workflow_header_widgets["project"])
 
         window.selected_folder = Path("demo_project")
         window.items = [_make_photo("001.jpg"), _make_photo("002.jpg")]
@@ -121,6 +128,8 @@ def test_project_home_empty_state_and_dashboard_visibility() -> None:
         assert not window.project_dashboard_card.isHidden()
         assert not window.project_setup_group.isHidden()
         assert not window.project_import_card.isHidden()
+        assert window.advanced_settings_group.isHidden()
+        assert all(not widget.isHidden() for widget in window.workflow_header_widgets["project"])
         assert window.dashboard_total_value.text() == "2"
         assert window.next_step_button.text() == "开始 AI 分析"
 
@@ -149,36 +158,48 @@ def test_empty_states_hide_inactive_controls() -> None:
         window.model.set_items([])
         window.update_project_dashboard()
 
-        assert not window.review_empty_state_card.isHidden()
+        assert not window.review_empty_state_wrapper.isHidden()
+        assert window.review_empty_state_card.maximumWidth() <= 700
         assert window.review_stack.isHidden()
+        assert window.review_mode_header_widget.isHidden()
+        assert window.review_context_label.isHidden()
         assert window.review_empty_import_button.text() == "导入照片"
+        assert window.review_empty_import_button.objectName() == "PrimaryButton"
         assert window.review_empty_project_button.text() == "返回项目中心"
 
-        assert not window.ai_empty_state_card.isHidden()
+        assert not window.ai_empty_state_wrapper.isHidden()
+        assert window.ai_empty_state_card.maximumWidth() <= 700
         assert window.ai_action_group.isHidden()
         assert window.ai_overview_group.isHidden()
+        assert "尚未运行 AI 分析" in _label_texts(window.ai_empty_state_card)
         assert window.ai_empty_start_button.text() == "开始 AI 分析"
+        assert window.ai_empty_start_button.objectName() == "PrimaryButton"
         assert window.ai_empty_group_button.text() == "生成 AI 相似候选组"
 
-        assert not window.export_empty_state_card.isHidden()
+        assert not window.export_empty_state_wrapper.isHidden()
+        assert window.export_empty_state_card.maximumWidth() <= 700
         assert window.export_controls_widget.isHidden()
         assert window.export_safety_group.isHidden()
         assert window.export_empty_review_button.text() == "进入审核与修正"
+        assert window.export_empty_review_button.objectName() == "PrimaryButton"
 
         window.items = [_make_photo("001.jpg")]
         window.items[0].review_status = REVIEW_STATUS_UNREVIEWED
         window.model.set_items(window.items)
         window.update_project_dashboard()
-        assert window.review_empty_state_card.isHidden()
+        assert window.review_empty_state_wrapper.isHidden()
         assert not window.review_stack.isHidden()
-        assert not window.export_empty_state_card.isHidden()
+        assert not window.review_mode_header_widget.isHidden()
+        assert not window.review_context_label.isHidden()
+        assert not window.export_empty_state_wrapper.isHidden()
         assert window.export_controls_widget.isHidden()
 
         window.items[0].review_status = REVIEW_STATUS_HUMAN_CONFIRMED
         window.items[0].delivery_use = ["客户可选"]
         window.update_project_dashboard()
-        assert window.export_empty_state_card.isHidden()
+        assert window.export_empty_state_wrapper.isHidden()
         assert not window.export_controls_widget.isHidden()
+        assert not window.export_safety_group.isHidden()
     finally:
         window.close()
         app.processEvents()
@@ -196,7 +217,7 @@ def test_workflow_labels_separate_ai_and_human_states() -> None:
         assert "AI 建议" in window.review_ai_suggestion_label.text()
         group_titles = [group.title() for group in window.findChildren(QGroupBox)]
         assert any(title.startswith("人工决定") for title in group_titles)
-        labels = [label.text() for label in window.findChildren(type(window.project_empty_state_label))]
+        labels = _label_texts(window)
         assert "人工状态筛选" in labels
         assert "AI建议筛选" in labels
         assert "视图与缩略图" in labels

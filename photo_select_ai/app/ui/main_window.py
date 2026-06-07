@@ -803,6 +803,9 @@ class MainWindow(QMainWindow):
         context.setObjectName("WorkflowContext")
         context.setWordWrap(True)
         self.workflow_context_labels[context_key] = context
+        if not hasattr(self, "workflow_header_widgets"):
+            self.workflow_header_widgets = {}
+        self.workflow_header_widgets[context_key] = [title_label, hint_label, context]
         layout.addWidget(title_label)
         layout.addWidget(hint_label)
         layout.addWidget(context)
@@ -934,11 +937,13 @@ class MainWindow(QMainWindow):
         self.advanced_settings_group.setObjectName("WorkflowCard")
         self.advanced_settings_group.setCheckable(True)
         self.advanced_settings_group.setChecked(False)
-        advanced_layout = QVBoxLayout(self.advanced_settings_group)
-        advanced_layout.addWidget(settings_widget)
+        self.advanced_settings_layout = QVBoxLayout(self.advanced_settings_group)
+        self.advanced_settings_widget = settings_widget
+        self.advanced_settings_layout.addWidget(settings_widget)
         self.advanced_settings_group.toggled.connect(settings_widget.setVisible)
         settings_widget.setVisible(False)
         layout.addWidget(self.advanced_settings_group)
+        self.advanced_settings_group.setVisible(False)
         layout.addStretch(1)
         return page
 
@@ -971,8 +976,9 @@ class MainWindow(QMainWindow):
         overview_layout.addWidget(self.ai_group_overview_label, 1, 1)
         overview_layout.addWidget(self.ai_business_overview_label, 2, 0, 1, 2)
         layout.addWidget(self.ai_overview_group)
-        self.ai_empty_state_card, ai_empty_layout = self._make_card("还没有 AI 分析结果", "EmptyStateCard")
-        ai_empty_body = QLabel("导入照片后，先运行 AI 分析。AI 会生成评分建议、业务类型和相似候选组，但不会自动变成人工确认。")
+        self.ai_empty_state_card, ai_empty_layout = self._make_card("尚未运行 AI 分析", "EmptyStateCard")
+        self.ai_empty_state_card.setMaximumWidth(680)
+        ai_empty_body = QLabel("AI会生成评分建议、业务类型建议和相似候选组。")
         ai_empty_body.setObjectName("EmptyStateBody")
         ai_empty_body.setWordWrap(True)
         self.ai_empty_start_button = self._make_button("开始 AI 分析", "批量分析未人工确认照片。")
@@ -985,7 +991,17 @@ class MainWindow(QMainWindow):
         ai_empty_buttons.addStretch(1)
         ai_empty_layout.addWidget(ai_empty_body)
         ai_empty_layout.addLayout(ai_empty_buttons)
-        layout.addWidget(self.ai_empty_state_card)
+        self.ai_empty_state_wrapper = QWidget()
+        ai_empty_outer = QVBoxLayout(self.ai_empty_state_wrapper)
+        ai_empty_outer.setContentsMargins(0, 0, 0, 0)
+        ai_empty_outer.addStretch(1)
+        ai_empty_row = QHBoxLayout()
+        ai_empty_row.addStretch(1)
+        ai_empty_row.addWidget(self.ai_empty_state_card)
+        ai_empty_row.addStretch(1)
+        ai_empty_outer.addLayout(ai_empty_row)
+        ai_empty_outer.addStretch(2)
+        layout.addWidget(self.ai_empty_state_wrapper, 1)
         layout.addStretch(1)
         return page
 
@@ -1010,6 +1026,7 @@ class MainWindow(QMainWindow):
         safety_layout.addWidget(self.move_source_checkbox)
         layout.addWidget(self.export_safety_group)
         self.export_empty_state_card, export_empty_layout = self._make_card("还没有可导出的人工确认结果", "EmptyStateCard")
+        self.export_empty_state_card.setMaximumWidth(680)
         export_empty_body = QLabel("请先进入审核与修正，确认精修候选、客户可选、直接交付、仅留档、重复或废片等人工结果。")
         export_empty_body.setObjectName("EmptyStateBody")
         export_empty_body.setWordWrap(True)
@@ -1017,7 +1034,17 @@ class MainWindow(QMainWindow):
         self.export_empty_review_button.setObjectName("PrimaryButton")
         export_empty_layout.addWidget(export_empty_body)
         export_empty_layout.addWidget(self.export_empty_review_button)
-        layout.addWidget(self.export_empty_state_card)
+        self.export_empty_state_wrapper = QWidget()
+        export_empty_outer = QVBoxLayout(self.export_empty_state_wrapper)
+        export_empty_outer.setContentsMargins(0, 0, 0, 0)
+        export_empty_outer.addStretch(1)
+        export_empty_row = QHBoxLayout()
+        export_empty_row.addStretch(1)
+        export_empty_row.addWidget(self.export_empty_state_card)
+        export_empty_row.addStretch(1)
+        export_empty_outer.addLayout(export_empty_row)
+        export_empty_outer.addStretch(2)
+        layout.addWidget(self.export_empty_state_wrapper, 1)
         self.export_controls_widget = export_widget
         layout.addWidget(export_widget)
         layout.addStretch(1)
@@ -1098,7 +1125,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.top_background_button)
         layout.addWidget(self.top_settings_button)
         self.top_background_button.clicked.connect(self.show_background_tasks_dialog)
-        self.top_settings_button.clicked.connect(lambda: self._activate_workflow_section("settings"))
+        self.top_settings_button.clicked.connect(self.show_advanced_settings_dialog)
         return bar
 
     def _project_status_text(self) -> str:
@@ -1170,6 +1197,10 @@ class MainWindow(QMainWindow):
             self.project_setup_group.setVisible(has_project)
         if hasattr(self, "project_import_card"):
             self.project_import_card.setVisible(has_project)
+        if hasattr(self, "advanced_settings_group"):
+            self.advanced_settings_group.setVisible(False)
+        for header_widget in getattr(self, "workflow_header_widgets", {}).get("project", []):
+            header_widget.setVisible(has_project)
         self.dashboard_total_value.setText(str(total))
         self.dashboard_total_note.setText(str(self.selected_folder or "尚未选择项目"))
         self.dashboard_ai_value.setText(f"{analyzed}/{total}" if total else "0")
@@ -1198,18 +1229,22 @@ class MainWindow(QMainWindow):
                 self.project_empty_state_label.setText(f"当前项目已导入 {total} 张照片。下一步建议：运行 AI 分析或进入审核与修正。")
             else:
                 self.project_empty_state_label.setText("尚未导入照片。建议先选择照片文件夹，再运行 AI 分析，最后进入人工审核。")
-        if hasattr(self, "review_empty_state_card"):
-            self.review_empty_state_card.setVisible(total == 0)
+        if hasattr(self, "review_empty_state_wrapper"):
+            self.review_empty_state_wrapper.setVisible(total == 0)
+        if hasattr(self, "review_mode_header_widget"):
+            self.review_mode_header_widget.setVisible(total > 0)
+        if hasattr(self, "review_context_label"):
+            self.review_context_label.setVisible(total > 0)
         if hasattr(self, "review_stack"):
             self.review_stack.setVisible(total > 0)
-        if hasattr(self, "ai_empty_state_card"):
-            self.ai_empty_state_card.setVisible(analyzed == 0)
+        if hasattr(self, "ai_empty_state_wrapper"):
+            self.ai_empty_state_wrapper.setVisible(analyzed == 0)
         if hasattr(self, "ai_action_group"):
             self.ai_action_group.setVisible(analyzed > 0)
         if hasattr(self, "ai_overview_group"):
             self.ai_overview_group.setVisible(analyzed > 0)
-        if hasattr(self, "export_empty_state_card"):
-            self.export_empty_state_card.setVisible(human_confirmed == 0)
+        if hasattr(self, "export_empty_state_wrapper"):
+            self.export_empty_state_wrapper.setVisible(human_confirmed == 0)
         if hasattr(self, "export_controls_widget"):
             self.export_controls_widget.setVisible(human_confirmed > 0)
         if hasattr(self, "export_safety_group"):
@@ -1251,7 +1286,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(board)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        header = QHBoxLayout()
+        self.review_mode_header_widget = QWidget()
+        header = QHBoxLayout(self.review_mode_header_widget)
+        header.setContentsMargins(0, 0, 0, 0)
         self.review_photo_mode_button = QPushButton("照片审核")
         self.review_similar_mode_button = QPushButton("AI相似候选组")
         for button in [self.review_photo_mode_button, self.review_similar_mode_button]:
@@ -1265,7 +1302,8 @@ class MainWindow(QMainWindow):
         self.review_context_label.setWordWrap(True)
         self.workflow_context_labels["review"] = self.review_context_label
         self.review_empty_state_card, review_empty_layout = self._make_card("暂无可审核照片", "EmptyStateCard")
-        review_empty_body = QLabel("请先导入照片，或检查当前筛选条件。导入后这里会显示照片列表、大图预览和人工审核面板。")
+        self.review_empty_state_card.setMaximumWidth(680)
+        review_empty_body = QLabel("请先导入照片并运行 AI 分析。")
         review_empty_body.setObjectName("EmptyStateBody")
         review_empty_body.setWordWrap(True)
         self.review_empty_project_button = self._make_button("返回项目中心", "回到导入与设置页面。")
@@ -1278,9 +1316,19 @@ class MainWindow(QMainWindow):
         review_empty_buttons.addStretch(1)
         review_empty_layout.addWidget(review_empty_body)
         review_empty_layout.addLayout(review_empty_buttons)
-        layout.addLayout(header)
+        self.review_empty_state_wrapper = QWidget()
+        review_empty_outer = QVBoxLayout(self.review_empty_state_wrapper)
+        review_empty_outer.setContentsMargins(0, 0, 0, 0)
+        review_empty_outer.addStretch(1)
+        review_empty_row = QHBoxLayout()
+        review_empty_row.addStretch(1)
+        review_empty_row.addWidget(self.review_empty_state_card)
+        review_empty_row.addStretch(1)
+        review_empty_outer.addLayout(review_empty_row)
+        review_empty_outer.addStretch(2)
+        layout.addWidget(self.review_mode_header_widget)
         layout.addWidget(self.review_context_label)
-        layout.addWidget(self.review_empty_state_card)
+        layout.addWidget(self.review_empty_state_wrapper, 1)
 
         self.review_stack = QStackedWidget()
         self.review_stack.setObjectName("ReviewCorrectionStack")
@@ -1470,9 +1518,8 @@ class MainWindow(QMainWindow):
 
     def _activate_workflow_section(self, section: str, persist: bool = True) -> None:
         if section == "settings":
-            section = "project"
-            if hasattr(self, "advanced_settings_group"):
-                self.advanced_settings_group.setChecked(True)
+            self.show_advanced_settings_dialog()
+            return
         if section == "similar":
             section = "review"
             self._set_review_subsection("similar", persist=False)
@@ -2538,6 +2585,10 @@ class MainWindow(QMainWindow):
                 font-weight: 800;
                 font-size: 15px;
             }
+            QFrame#EmptyStateCard QLabel#CardTitle {
+                font-size: 22px;
+                font-weight: 900;
+            }
             QLabel#MetricValue {
                 color: #ffffff;
                 font-size: 26px;
@@ -2629,6 +2680,7 @@ class MainWindow(QMainWindow):
             QScrollArea#PreviewScroll { background: #1f2329; border: 1px solid #303744; border-radius: 8px; }
             QScrollArea#RightScroll { background: transparent; border: none; }
             QScrollArea#TopDetailScroll { background: transparent; border: none; }
+            QScrollArea#AdvancedSettingsDialogScroll { background: transparent; border: none; }
             QSplitter::handle { background: #303744; }
             QSplitter::handle:hover { background: #475569; }
             QTabWidget#WorkflowTabs::pane { border: 1px solid #303744; border-radius: 8px; background: #20262f; }
@@ -2929,6 +2981,48 @@ class MainWindow(QMainWindow):
             self._activate_workflow_section("review")
             return
         self._activate_workflow_section("export")
+
+    def show_advanced_settings_dialog(self) -> None:
+        if not hasattr(self, "advanced_settings_widget"):
+            QMessageBox.information(self, "设置", "高级设置暂不可用。")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("设置 / 高级 / 调试")
+        dialog.resize(920, 680)
+        layout = QVBoxLayout(dialog)
+        title = QLabel("设置 / 高级 / 调试")
+        title.setObjectName("WorkflowPageTitle")
+        hint = QLabel("这里保留模型、缓存、后台任务和调试工具。普通审片流程不需要打开这些设置。")
+        hint.setObjectName("WorkflowPageHint")
+        hint.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("AdvancedSettingsDialogScroll")
+        widget = self.advanced_settings_widget
+        widget.setVisible(True)
+        widget.setParent(None)
+        scroll.setWidget(widget)
+        layout.addWidget(scroll, 1)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        close_button = self._make_button("关闭", "关闭设置窗口。")
+        close_button.setObjectName("SecondaryButton")
+        close_button.clicked.connect(dialog.accept)
+        close_row.addWidget(close_button)
+        layout.addLayout(close_row)
+
+        dialog.exec()
+        restored_widget = scroll.takeWidget()
+        if restored_widget is not None:
+            restored_widget.setParent(self.advanced_settings_group)
+            self.advanced_settings_layout.addWidget(restored_widget)
+            restored_widget.setVisible(False)
+        self.advanced_settings_group.setChecked(False)
+        self.advanced_settings_group.setVisible(False)
 
     @Slot()
     def select_folder(self) -> None:
