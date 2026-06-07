@@ -136,30 +136,26 @@ THUMBNAIL_SIZES = {
 
 FILTERS = [
     "全部",
-    "精修候选",
-    "可交付",
-    "备选",
-    "重复",
-    "废片",
-    "作品集候选",
-    "练习片",
-    "人工复核",
-    "AI低置信度",
-    "相似重复待选",
-    "单人写真",
-    "双人写真",
-    "多人写真",
-    "婚纱照",
-    "全家福",
-    "亲子照",
-    "儿童写真",
-    "中老年写真",
-    "商务会议合影",
-    "活动纪实",
-    "风景/环境",
+    "人工：精修候选",
+    "人工：可交付",
+    "人工：备选",
+    "人工：重复",
+    "人工：废片",
+    "人工：作品集候选",
+    "人工：练习片",
+    "人工：待复核",
+    "AI：低置信度",
+    "AI：相似候选组",
+    "AI业务：婚纱写真",
+    "AI业务：个人写真",
+    "AI业务：情侣/双人写真",
+    "AI业务：家庭合影",
+    "AI业务：商务形象照",
+    "AI业务：会议/活动照",
+    "AI业务：无法判断",
 ]
 
-SORTS = ["文件名", "拍摄时间", "AI分类", "手动分类", "置信度", "相似组"]
+SORTS = ["文件名", "拍摄时间", "AI业务建议", "人工确认", "置信度", "相似组"]
 
 
 def _quality_rating_map() -> dict[str, str]:
@@ -431,36 +427,39 @@ class PhotoListModel(QAbstractListModel):
         name = self.filter_name
         if name == "全部":
             return True
-        if name == "精修候选":
+        legacy_name = name
+        if name.startswith("人工："):
+            legacy_name = name.removeprefix("人工：")
+        elif name.startswith("AI业务："):
+            return item.ai_primary_category == name.removeprefix("AI业务：")
+        if legacy_name == "精修候选":
             return item.manual_category == MANUAL_SELECTED
-        if name == "可交付":
+        if legacy_name == "可交付":
             return item.manual_category == MANUAL_RETOUCH
-        if name == "备选":
+        if legacy_name == "备选":
             return item.manual_category == MANUAL_PENDING
-        if name == "重复":
-            return item.manual_category == MANUAL_CROP or bool(item.similar_group_id)
-        if name == "废片":
+        if legacy_name == "重复":
+            return item.manual_category == MANUAL_CROP or item.similar_group_status == "duplicate"
+        if legacy_name == "废片":
             return item.manual_category == MANUAL_REJECTED
-        if name == "作品集候选":
+        if legacy_name == "作品集候选":
             return item.manual_category == MANUAL_PORTFOLIO
-        if name == "练习片":
+        if legacy_name == "练习片":
             return item.manual_category == MANUAL_PRACTICE
-        if name == "人工复核":
-            return item.final_category.startswith(PRIMARY_REVIEW) or item.ai_primary_category == PRIMARY_REVIEW
-        if name == "AI低置信度":
+        if legacy_name in {"待复核", "人工复核"}:
+            return item.review_status == REVIEW_STATUS_NEEDS_REVIEW
+        if name == "AI：低置信度":
             return bool(item.ai_primary_category) and item.ai_confidence < 0.65
-        if name == "相似重复待选":
-            return item.ai_primary_category == PRIMARY_DUPLICATE or bool(item.similar_group_id)
-        if name == "多人写真":
-            return item.ai_primary_category in {"多人写真"}
+        if name == "AI：相似候选组":
+            return bool(item.auto_group_id)
         return item.ai_primary_category == name or item.final_category.startswith(name)
 
     def _sort_key(self, item: PhotoItem):
         if self.sort_name == "拍摄时间":
             return item.taken_at or item.filename
-        if self.sort_name == "AI分类":
+        if self.sort_name in {"AI分类", "AI业务建议"}:
             return (item.ai_primary_category, item.ai_secondary_category, item.filename)
-        if self.sort_name == "手动分类":
+        if self.sort_name in {"手动分类", "人工确认"}:
             return (item.manual_category, item.filename)
         if self.sort_name == "置信度":
             return (-item.ai_confidence, item.filename)
@@ -683,6 +682,7 @@ class MainWindow(QMainWindow):
         self.active_export_task: BackgroundTask | None = None
         self.background_ask_prompted = False
         self.shortcut_manager: ShortcutManager | None = None
+        self._last_preference_record_key = ""
 
         self.model = PhotoListModel()
         self.left_delegate = ThumbnailDelegate(self)
@@ -716,6 +716,7 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
+        self.workflow_context_labels: dict[str, QLabel] = {}
         workflow_panel = self._build_workflow_panel()
         self._extract_workflow_pages(workflow_panel)
         self.similar_group_panel.setObjectName("SimilarGroupPage")
@@ -727,18 +728,17 @@ class MainWindow(QMainWindow):
         self.main_stack = QStackedWidget()
         self.main_stack.setObjectName("MainContentStack")
         self.review_workspace = self._build_review_workspace()
+        self.review_board = self._build_review_board()
         self.page_widgets = {
             "project": self.project_import_page,
-            "review": self.review_workspace,
-            "similar": self.similar_group_panel,
             "ai": self.ai_analysis_page,
+            "review": self.review_board,
             "export": self.export_review_page,
-            "style": self.style_training_page,
-            "settings": self.settings_debug_page,
         }
-        for page in ["project", "review", "similar", "ai", "export", "style", "settings"]:
+        for page in ["project", "ai", "review", "export"]:
             self.main_stack.addWidget(self.page_widgets[page])
         self.current_main_section = "review"
+        self.current_review_subsection = "photo"
         self.body_splitter.addWidget(self.main_stack)
         self.body_splitter.setStretchFactor(0, 0)
         self.body_splitter.setStretchFactor(1, 1)
@@ -755,6 +755,7 @@ class MainWindow(QMainWindow):
         self.open_report_button.setEnabled(False)
         self.current_ai_button.setEnabled(False)
         self.ai_analyze_button.setEnabled(False)
+        self.model_auto_group_button.setEnabled(False)
         self.reanalyze_unconfirmed_button.setEnabled(False)
         self.clear_stale_ai_button.setEnabled(False)
         self.reanalyze_current_suggestion_button.setEnabled(False)
@@ -763,6 +764,7 @@ class MainWindow(QMainWindow):
         self.group_backup_quick_button.setEnabled(False)
         self.group_duplicate_quick_button.setEnabled(False)
         self._restore_layout_state()
+        self._refresh_workflow_contexts()
 
     def _extract_workflow_pages(self, workflow_tabs: QTabWidget) -> None:
         pages: list[QWidget] = []
@@ -770,13 +772,136 @@ class MainWindow(QMainWindow):
             page = workflow_tabs.widget(0)
             workflow_tabs.removeTab(0)
             pages.append(page)
-        self.project_import_page = self._wrap_page_scroll(pages[0], "ProjectImportPage")
-        self.ai_analysis_page = self._wrap_page_scroll(pages[1], "AIAnalysisPage")
+        self.project_import_page = self._wrap_page_scroll(
+            self._build_import_settings_page(pages[0], pages[4]),
+            "ProjectImportPage",
+        )
+        self.ai_analysis_page = self._wrap_page_scroll(
+            self._build_ai_analysis_results_page(pages[1]),
+            "AIAnalysisPage",
+        )
         self.review_actions_page = pages[2]
         self.review_actions_page.setParent(self)
         self.style_training_page = self._wrap_page_scroll(pages[3], "StyleTrainingPage")
-        self.settings_debug_page = self._wrap_page_scroll(pages[4], "SettingsDebugPage")
-        self.export_review_page = self._wrap_page_scroll(self.export_page, "ExportReviewPage")
+        self.export_review_page = self._wrap_page_scroll(
+            self._build_export_organize_page(self.export_page),
+            "ExportReviewPage",
+        )
+
+    def _build_page_shell(self, title: str, hint: str, context_key: str) -> tuple[QWidget, QVBoxLayout]:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+        title_label = QLabel(title)
+        title_label.setObjectName("WorkflowPageTitle")
+        title_label.setWordWrap(True)
+        hint_label = QLabel(hint)
+        hint_label.setObjectName("WorkflowPageHint")
+        hint_label.setWordWrap(True)
+        context = QLabel(self._workflow_context_text())
+        context.setObjectName("WorkflowContext")
+        context.setWordWrap(True)
+        self.workflow_context_labels[context_key] = context
+        layout.addWidget(title_label)
+        layout.addWidget(hint_label)
+        layout.addWidget(context)
+        return page, layout
+
+    def _build_import_settings_page(self, project_widget: QWidget, settings_widget: QWidget) -> QWidget:
+        page, layout = self._build_page_shell(
+            "1. 导入与设置",
+            "先选择照片文件夹，再告诉软件这批照片的大致业务场景和处理目标。高级参数默认折叠，避免干扰审片。",
+            "project",
+        )
+        setup_group = QGroupBox("基础业务设置")
+        setup_layout = QGridLayout(setup_group)
+        self.business_style_combo = QComboBox()
+        self.business_style_combo.addItems(["婚纱写真", "个人写真", "情侣/双人写真", "家庭合影", "商务形象照", "会议/活动照", "混合/无法判断"])
+        self.process_goal_combo = QComboBox()
+        self.process_goal_combo.addItems(["快速初筛", "精修候选", "客户选片", "作品集筛选", "相似照片整理"])
+        self.model_strength_combo = QComboBox()
+        self.model_strength_combo.addItems(["保守：少合并，宁愿多拆", "平衡：默认", "激进：更多合并，适合快速整理"])
+        self.model_strength_combo.setCurrentText("平衡：默认")
+        self.model_default_label = QLabel(self._model_default_text())
+        self.model_default_label.setWordWrap(True)
+        setup_layout.addWidget(QLabel("基础业务风格"), 0, 0)
+        setup_layout.addWidget(self.business_style_combo, 0, 1)
+        setup_layout.addWidget(QLabel("处理目标"), 1, 0)
+        setup_layout.addWidget(self.process_goal_combo, 1, 1)
+        setup_layout.addWidget(QLabel("模型强度"), 2, 0)
+        setup_layout.addWidget(self.model_strength_combo, 2, 1)
+        setup_layout.addWidget(QLabel("默认参数"), 3, 0)
+        setup_layout.addWidget(self.model_default_label, 3, 1)
+        layout.addWidget(setup_group)
+        layout.addWidget(project_widget)
+
+        self.advanced_settings_group = QGroupBox("高级设置 / 模型 / 调试")
+        self.advanced_settings_group.setCheckable(True)
+        self.advanced_settings_group.setChecked(False)
+        advanced_layout = QVBoxLayout(self.advanced_settings_group)
+        advanced_layout.addWidget(settings_widget)
+        self.advanced_settings_group.toggled.connect(settings_widget.setVisible)
+        settings_widget.setVisible(False)
+        layout.addWidget(self.advanced_settings_group)
+        layout.addStretch(1)
+        return page
+
+    def _build_ai_analysis_results_page(self, ai_widget: QWidget) -> QWidget:
+        page, layout = self._build_page_shell(
+            "2. AI分析结果",
+            "这里运行 AI 预分析和 AI 相似候选组。AI 结果只是建议，不等于人工确认结果。",
+            "ai",
+        )
+        action_group = QGroupBox("AI分析入口")
+        action_layout = QVBoxLayout(action_group)
+        action_layout.addWidget(ai_widget)
+        layout.addWidget(action_group)
+
+        overview_group = QGroupBox("结果总览：AI建议，不是人工结论")
+        overview_layout = QGridLayout(overview_group)
+        self.ai_progress_summary_label = QLabel("进度：尚未运行 AI 分析。")
+        self.ai_score_overview_label = QLabel("A. AI评分建议：暂无")
+        self.ai_group_overview_label = QLabel("B. AI相似候选组：暂无")
+        self.ai_business_overview_label = QLabel("C. 业务类型建议：暂无")
+        for label in [
+            self.ai_progress_summary_label,
+            self.ai_score_overview_label,
+            self.ai_group_overview_label,
+            self.ai_business_overview_label,
+        ]:
+            label.setWordWrap(True)
+        overview_layout.addWidget(self.ai_progress_summary_label, 0, 0, 1, 2)
+        overview_layout.addWidget(self.ai_score_overview_label, 1, 0)
+        overview_layout.addWidget(self.ai_group_overview_label, 1, 1)
+        overview_layout.addWidget(self.ai_business_overview_label, 2, 0, 1, 2)
+        layout.addWidget(overview_group)
+        layout.addStretch(1)
+        return page
+
+    def _build_export_organize_page(self, export_widget: QWidget) -> QWidget:
+        page, layout = self._build_page_shell(
+            "4. 导出与整理",
+            "导出默认只复制到新文件夹，并生成 CSV / Markdown 复盘报告。源文件移动默认关闭，且本版本不自动删除任何原图。",
+            "export",
+        )
+        safety_group = QGroupBox("源文件安全")
+        safety_layout = QVBoxLayout(safety_group)
+        self.export_copy_safety_label = QLabel("推荐：复制到新文件夹 + 生成报告。人工“重复 / 废片 / 不导出”只影响导出清单，不会删除原图。")
+        self.export_copy_safety_label.setWordWrap(True)
+        self.move_source_checkbox = QCheckBox("高级：移动源文件分类（默认关闭，需要二次确认；当前版本不执行自动移动）")
+        self.move_source_checkbox.setChecked(False)
+        self.move_source_checkbox.setEnabled(False)
+        self.move_source_checkbox.setToolTip("为了保护原图，v0.6.0 仅保留入口说明；如未来启用，必须先生成 dry-run 计划并二次确认。")
+        self.lr_c1_list_checkbox = QCheckBox("生成 Lightroom / Capture One 可用清单（随 CSV 报告记录，后续可扩展专用格式）")
+        self.lr_c1_list_checkbox.setChecked(True)
+        safety_layout.addWidget(self.export_copy_safety_label)
+        safety_layout.addWidget(self.lr_c1_list_checkbox)
+        safety_layout.addWidget(self.move_source_checkbox)
+        layout.addWidget(safety_group)
+        layout.addWidget(export_widget)
+        layout.addStretch(1)
+        return page
 
     def _wrap_page_scroll(self, widget: QWidget, object_name: str) -> QScrollArea:
         scroll = QScrollArea()
@@ -827,6 +952,45 @@ class MainWindow(QMainWindow):
             display = f".../{name[:36]}" if len(name) > 36 else f".../{name}"
         return f"项目：{display}"
 
+    def _model_default_text(self) -> str:
+        device = "CUDA" if self.ai_env.cuda_available else "CPU / fallback"
+        return (
+            f"OpenCLIP/CUDA：{device}；"
+            f"AI相似候选阈值：{self.config.embedding_similarity_threshold:.2f}；"
+            f"分组策略：{self.config.grouping_strategy}；"
+            "缓存：启用。"
+        )
+
+    def _workflow_context_text(self) -> str:
+        total = len(getattr(self, "items", []))
+        if total <= 0:
+            return "当前照片：-｜序号：0/0｜AI建议：-｜人工确认：-｜系统状态：尚未导入照片"
+        if 0 <= self.current_source_index < total:
+            item = self.items[self.current_source_index]
+            current = self.current_source_index + 1
+            ai_text = item.final_recommendation or item.ai_category_path or item.ai_primary_category or "-"
+            human_text = " / ".join(
+                value
+                for value in [
+                    _quality_rating_text(item.quality_rating) if item.quality_rating else "",
+                    _join_values(item.delivery_use) if item.delivery_use else "",
+                    _review_status_text(item),
+                ]
+                if value
+            ) or "-"
+            return (
+                f"当前照片：{item.filename}｜序号：{current}/{total}｜"
+                f"AI建议：{ai_text}｜人工确认：{human_text}｜系统状态：{_review_status_text(item)}"
+            )
+        return f"当前照片：未选择｜序号：0/{total}｜AI建议：-｜人工确认：-｜系统状态：等待选择照片"
+
+    def _refresh_workflow_contexts(self) -> None:
+        text = self._workflow_context_text()
+        for label in getattr(self, "workflow_context_labels", {}).values():
+            label.setText(text)
+        if hasattr(self, "model_default_label"):
+            self.model_default_label.setText(self._model_default_text())
+
     def _build_sidebar_navigation(self) -> QWidget:
         sidebar = QFrame()
         sidebar.setObjectName("SidebarNavigation")
@@ -840,13 +1004,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         self.nav_buttons: dict[str, QPushButton] = {}
         sections = [
-            ("project", "项目导入"),
-            ("review", "审片工作台"),
-            ("similar", "相似组筛选"),
-            ("ai", "AI 分析"),
-            ("export", "导出复盘"),
-            ("style", "我的审片风格"),
-            ("settings", "设置 / 高级调试"),
+            ("project", "1. 导入与设置"),
+            ("ai", "2. AI分析结果"),
+            ("review", "3. 审核与修正"),
+            ("export", "4. 导出与整理"),
         ]
         for key, text in sections:
             button = QPushButton(text)
@@ -859,6 +1020,52 @@ class MainWindow(QMainWindow):
             layout.addWidget(button)
         layout.addStretch(1)
         return sidebar
+
+    def _build_review_board(self) -> QWidget:
+        board = QWidget()
+        board.setObjectName("ReviewCorrectionPage")
+        layout = QVBoxLayout(board)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        header = QHBoxLayout()
+        self.review_photo_mode_button = QPushButton("照片审核")
+        self.review_similar_mode_button = QPushButton("AI相似候选组")
+        for button in [self.review_photo_mode_button, self.review_similar_mode_button]:
+            button.setCheckable(True)
+            button.setMinimumHeight(32)
+            button.setObjectName("WorkflowSubNavButton")
+            header.addWidget(button)
+        header.addStretch(1)
+        self.review_context_label = QLabel(self._workflow_context_text())
+        self.review_context_label.setObjectName("WorkflowContext")
+        self.review_context_label.setWordWrap(True)
+        self.workflow_context_labels["review"] = self.review_context_label
+        layout.addLayout(header)
+        layout.addWidget(self.review_context_label)
+
+        self.review_stack = QStackedWidget()
+        self.review_stack.setObjectName("ReviewCorrectionStack")
+        self.review_stack.addWidget(self.review_workspace)
+        self.review_stack.addWidget(self.similar_group_panel)
+        layout.addWidget(self.review_stack, 1)
+
+        self.review_photo_mode_button.clicked.connect(lambda: self._set_review_subsection("photo"))
+        self.review_similar_mode_button.clicked.connect(lambda: self._set_review_subsection("similar"))
+        self._set_review_subsection("photo", persist=False)
+        return board
+
+    def _set_review_subsection(self, subsection: str, persist: bool = True) -> None:
+        if not hasattr(self, "review_stack"):
+            return
+        self.current_review_subsection = "similar" if subsection == "similar" else "photo"
+        self.review_stack.setCurrentIndex(1 if self.current_review_subsection == "similar" else 0)
+        if hasattr(self, "review_photo_mode_button"):
+            self.review_photo_mode_button.setChecked(self.current_review_subsection == "photo")
+            self.review_similar_mode_button.setChecked(self.current_review_subsection == "similar")
+        if self.current_review_subsection == "similar":
+            self.refresh_similarity_panel()
+        if persist:
+            self._save_layout_state()
 
     def _build_flow_navigation_bar(self) -> QWidget:
         bar = QFrame()
@@ -1003,15 +1210,25 @@ class MainWindow(QMainWindow):
             self._save_layout_state()
 
     def _activate_workflow_section(self, section: str, persist: bool = True) -> None:
+        if section == "settings":
+            section = "project"
+            if hasattr(self, "advanced_settings_group"):
+                self.advanced_settings_group.setChecked(True)
+        if section == "similar":
+            section = "review"
+            self._set_review_subsection("similar", persist=False)
+        elif section == "review":
+            self._set_review_subsection("photo", persist=False)
         if not hasattr(self, "page_widgets") or section not in self.page_widgets:
             section = "review"
         self.current_main_section = section
         self.main_stack.setCurrentWidget(self.page_widgets[section])
-        if section == "similar":
+        if section == "review" and getattr(self, "current_review_subsection", "photo") == "similar":
             self.refresh_similarity_panel()
         if section == "export":
             self.update_export_stats()
         self._set_active_nav_button(section)
+        self._refresh_workflow_contexts()
         if persist:
             self._save_layout_state()
 
@@ -1030,6 +1247,7 @@ class MainWindow(QMainWindow):
         settings.setValue("layout/body_splitter", self.body_splitter.saveState())
         settings.setValue("layout/horizontal_splitter", self.horizontal_splitter.saveState())
         settings.setValue("layout/main_section", getattr(self, "current_main_section", "review"))
+        settings.setValue("layout/review_subsection", getattr(self, "current_review_subsection", "photo"))
         settings.setValue("layout/window_geometry", self.saveGeometry())
 
     def _restore_layout_state(self) -> None:
@@ -1053,7 +1271,10 @@ class MainWindow(QMainWindow):
             self.horizontal_splitter.setSizes([240, 1120, 360])
         self._ensure_review_splitter_priority()
         section = str(settings.value("layout/main_section", "review")) if layout_version == 4 else "review"
-        self._activate_workflow_section(section if section in getattr(self, "page_widgets", {}) else "review", persist=False)
+        self._activate_workflow_section(section, persist=False)
+        review_subsection = str(settings.value("layout/review_subsection", "photo")) if layout_version == 4 else "photo"
+        if self.current_main_section == "review":
+            self._set_review_subsection(review_subsection, persist=False)
         self.body_splitter.splitterMoved.connect(lambda _pos, _index: self._save_layout_state())
         self.horizontal_splitter.splitterMoved.connect(lambda _pos, _index: self._save_layout_state())
 
@@ -1104,6 +1325,7 @@ class MainWindow(QMainWindow):
 
         self.current_ai_button = self._make_button("分析当前照片", "只分析当前照片，适合复核单张疑难片。不会覆盖人工分类。")
         self.ai_analyze_button = self._make_button("批量 AI 分析", "第二步：批量生成 AI 推荐、评分、相似组和修图建议。快捷键 Ctrl+Shift+A。")
+        self.model_auto_group_button = self._make_button("生成 AI 相似候选组", "使用模型 embedding 生成相似候选组选片建议；只写 auto_group_* 字段，不覆盖人工结果。")
         self.reanalyze_unconfirmed_button = self._make_button("重新分析未人工确认", "使用最新 AI 规则重新分析未审、AI已审和待复核照片；人工已确认的照片不会被覆盖。")
         self.clear_stale_ai_button = self._make_button("清理旧版 AI 建议", "清空旧版或串图的 AI 建议，不清空人工筛片结果，也不会删除原图。")
         self.rescore_button = self._make_button("重新评分", "基于已有 AI 结果、当前策略和阈值重新计算最终建议，不重新跑模型。")
@@ -1116,7 +1338,7 @@ class MainWindow(QMainWindow):
         ai_tab = self._tab_with_rows(
             [
                 [self.ai_version_label],
-                [self.current_ai_button, self.ai_analyze_button, self.reanalyze_unconfirmed_button, self.clear_stale_ai_button],
+                [self.current_ai_button, self.ai_analyze_button, self.model_auto_group_button, self.reanalyze_unconfirmed_button, self.clear_stale_ai_button],
                 [self.rescore_button, self.analysis_stats_button, self.cancel_ai_button],
                 [self.analysis_stats_label],
             ]
@@ -1520,8 +1742,8 @@ class MainWindow(QMainWindow):
         self.file_name_label.setWordWrap(True)
         self.basic_info_label = QLabel("-")
         self.basic_info_label.setWordWrap(True)
-        self.manual_label = QLabel("人工分类：-")
-        self.final_label = QLabel("最终导出：-")
+        self.manual_label = QLabel("人工确认：-")
+        self.final_label = QLabel("系统导出分类（人工优先）：-")
         self.review_sequence_label = QLabel("当前序号：-")
         self.review_status_label = QLabel(f"审片状态：{REVIEW_STATUS_UNREVIEWED}")
 
@@ -1537,14 +1759,14 @@ class MainWindow(QMainWindow):
 
         self.review_ai_suggestion_label = QLabel("暂无 AI 建议，请先运行 AI 预分析或手动筛片。")
         self.review_ai_suggestion_label.setWordWrap(True)
-        ai_review_group = QGroupBox("AI建议")
+        ai_review_group = QGroupBox("AI建议，仅供参考")
         ai_review_layout = QVBoxLayout(ai_review_group)
         ai_review_layout.addWidget(self.review_ai_suggestion_label)
         self.reanalyze_current_suggestion_button = self._make_button("重新分析当前照片", "使用最新业务分类规则重新分析当前照片；人工已确认字段不会被覆盖。")
         ai_review_layout.addWidget(self.reanalyze_current_suggestion_button)
         layout.addWidget(ai_review_group)
 
-        type_group = QGroupBox("照片类型")
+        type_group = QGroupBox("人工决定：照片类型")
         type_layout = QVBoxLayout(type_group)
         self.photo_type_combo = QComboBox()
         self.photo_type_combo.addItem("")
@@ -1552,13 +1774,13 @@ class MainWindow(QMainWindow):
         type_layout.addWidget(self.photo_type_combo)
         layout.addWidget(type_group)
 
-        subtype_group = QGroupBox("细分类别")
+        subtype_group = QGroupBox("人工决定：细分类别")
         subtype_layout = QVBoxLayout(subtype_group)
         self.subtype_combo = QComboBox()
         subtype_layout.addWidget(self.subtype_combo)
         layout.addWidget(subtype_group)
 
-        quality_group = QGroupBox("品质评级")
+        quality_group = QGroupBox("人工决定：品质评级")
         quality_layout = QGridLayout(quality_group)
         self.quality_buttons: dict[str, QPushButton] = {}
         for index, rating in enumerate(get_quality_ratings()):
@@ -1585,7 +1807,7 @@ class MainWindow(QMainWindow):
         scores_layout.addWidget(self.portfolio_score_spin, 1, 1)
         layout.addWidget(scores_group)
 
-        delivery_group = QGroupBox("交付用途")
+        delivery_group = QGroupBox("人工决定：交付用途")
         delivery_layout = QGridLayout(delivery_group)
         self.delivery_checkboxes: dict[str, QCheckBox] = {}
         for index, name in enumerate(get_delivery_uses()):
@@ -1594,7 +1816,7 @@ class MainWindow(QMainWindow):
             delivery_layout.addWidget(checkbox, index // 2, index % 2)
         layout.addWidget(delivery_group)
 
-        issues_group = QGroupBox("问题标签")
+        issues_group = QGroupBox("人工决定：问题标签")
         issues_layout = QGridLayout(issues_group)
         self.issue_checkboxes: dict[str, QCheckBox] = {}
         for index, name in enumerate(get_issue_tags()):
@@ -1603,7 +1825,7 @@ class MainWindow(QMainWindow):
             issues_layout.addWidget(checkbox, index // 2, index % 2)
         layout.addWidget(issues_group)
 
-        note_group = QGroupBox("人工备注")
+        note_group = QGroupBox("人工确认：备注")
         note_layout = QVBoxLayout(note_group)
         self.review_note_edit = QTextEdit()
         self.review_note_edit.setMinimumHeight(110)
@@ -1623,7 +1845,7 @@ class MainWindow(QMainWindow):
         actions_layout.addWidget(self.reset_review_button, 1, 1)
         layout.addWidget(actions_group)
 
-        similar_actions_group = QGroupBox("相似组操作")
+        similar_actions_group = QGroupBox("人工确认：AI相似候选组处理")
         similar_actions_layout = QGridLayout(similar_actions_group)
         self.show_group_button = QPushButton("查看本组")
         self.recommended_keep_button = QPushButton("设为组内最佳")
@@ -1634,6 +1856,33 @@ class MainWindow(QMainWindow):
         similar_actions_layout.addWidget(self.group_backup_quick_button, 1, 0)
         similar_actions_layout.addWidget(self.group_duplicate_quick_button, 1, 1)
         layout.addWidget(similar_actions_group)
+
+        learning_group = QGroupBox("学习我的选片逻辑（只记录样本，不训练大模型）")
+        learning_layout = QGridLayout(learning_group)
+        self.preference_record_checkbox = QCheckBox("保存人工修正为偏好样本")
+        self.preference_record_checkbox.setChecked(True)
+        self.preference_reason_combo = QComboBox()
+        self.preference_reason_combo.addItems(
+            [
+                "表情问题",
+                "动作问题",
+                "光线问题",
+                "构图问题",
+                "重复片",
+                "客户可能喜欢",
+                "作品集价值",
+                "只留档",
+            ]
+        )
+        self.record_pref_current_button = QPushButton("记录当前人工决定")
+        self.preference_hint_label = QLabel("当你保存人工决定时，会记录 AI 原建议、用户最终选择、是否采纳 AI 和修改原因标签。")
+        self.preference_hint_label.setWordWrap(True)
+        learning_layout.addWidget(self.preference_record_checkbox, 0, 0, 1, 2)
+        learning_layout.addWidget(QLabel("修改原因标签"), 1, 0)
+        learning_layout.addWidget(self.preference_reason_combo, 1, 1)
+        learning_layout.addWidget(self.record_pref_current_button, 2, 0, 1, 2)
+        learning_layout.addWidget(self.preference_hint_label, 3, 0, 1, 2)
+        layout.addWidget(learning_group)
 
         mark_group = QGroupBox("旧分类/兼容")
         mark_group.setCheckable(True)
@@ -1697,19 +1946,19 @@ class MainWindow(QMainWindow):
             return group
 
         add_ai_group(
-            "AI推荐结论",
+            "AI建议：推荐结论",
             [
-                ("AI推荐分类", "ai_path"),
-                ("一级分类", "primary"),
-                ("二级分类", "secondary"),
+                ("AI业务类型建议", "ai_path"),
+                ("AI一级建议", "primary"),
+                ("AI二级建议", "secondary"),
                 ("置信度", "confidence"),
-                ("最终建议", "final_recommendation"),
-                ("筛选原因", "screening_reason"),
+                ("AI评分建议", "final_recommendation"),
+                ("AI理由", "screening_reason"),
             ],
         )
         self.ai_labels["final_recommendation"].setObjectName("ImportantConclusion")
         add_ai_group(
-            "多模型分析结果",
+            "AI建议：多模型分析结果",
             [
                 ("基础质量", "module_basic"),
                 ("人脸状态", "module_face"),
@@ -1721,7 +1970,7 @@ class MainWindow(QMainWindow):
             ],
         )
         add_ai_group(
-            "技术评分",
+            "AI建议：技术评分",
             [
                 ("质量标签", "quality"),
                 ("绝对质量分", "absolute_score"),
@@ -1733,7 +1982,7 @@ class MainWindow(QMainWindow):
             ],
         )
         add_ai_group(
-            "审美与商业评分",
+            "AI建议：审美与商业评分",
             [
                 ("用户偏好模型分数", "preference_score"),
                 ("用户偏好判断原因", "preference_reason"),
@@ -1744,7 +1993,7 @@ class MainWindow(QMainWindow):
             ],
         )
         add_ai_group(
-            "修图建议",
+            "AI建议：修图建议",
             [
                 ("是否可修", "retouchable"),
                 ("是否可裁切", "croppable"),
@@ -1756,7 +2005,7 @@ class MainWindow(QMainWindow):
             ],
         )
         debug_group = add_ai_group(
-            "模型/调试信息",
+            "系统状态：模型/调试信息",
             [
                 ("识别来源", "source"),
                 ("语义Top3", "top3"),
@@ -1792,6 +2041,7 @@ class MainWindow(QMainWindow):
         self.current_ai_button.clicked.connect(self.start_current_ai)
         self.reanalyze_current_suggestion_button.clicked.connect(self.start_current_ai)
         self.ai_analyze_button.clicked.connect(self.start_batch_ai)
+        self.model_auto_group_button.clicked.connect(self.start_model_auto_group_ui)
         self.reanalyze_unconfirmed_button.clicked.connect(self.reanalyze_unconfirmed_photos)
         self.clear_stale_ai_button.clicked.connect(self.clear_stale_ai_suggestions)
         self.cancel_ai_button.clicked.connect(self.cancel_ai)
@@ -1875,6 +2125,7 @@ class MainWindow(QMainWindow):
         self.recommended_keep_button.clicked.connect(self.set_recommended_keep)
         self.group_backup_quick_button.clicked.connect(lambda: self.set_current_group_status("backup"))
         self.group_duplicate_quick_button.clicked.connect(lambda: self.set_current_group_status("duplicate"))
+        self.record_pref_current_button.clicked.connect(self.record_current_preference)
         self.record_pref_button.clicked.connect(self.record_current_preference)
         self.train_pref_button.clicked.connect(self.train_preference_model_ui)
         self.apply_pref_button.clicked.connect(self.apply_preference_model)
@@ -1968,6 +2219,18 @@ class MainWindow(QMainWindow):
                 color: #f8fafc;
                 font-weight: 700;
             }
+            QLabel#WorkflowPageTitle {
+                color: #ffffff;
+                font-size: 20px;
+                font-weight: 800;
+            }
+            QLabel#WorkflowPageHint, QLabel#WorkflowContext {
+                background: #20262f;
+                border: 1px solid #303744;
+                border-radius: 8px;
+                color: #dbeafe;
+                padding: 8px;
+            }
             QFrame#SidebarNavigation {
                 background: #20262f;
                 border: 1px solid #303744;
@@ -1985,6 +2248,18 @@ class MainWindow(QMainWindow):
                 border-color: #60a5fa;
                 color: #ffffff;
                 font-weight: 700;
+            }
+            QPushButton#WorkflowSubNavButton {
+                background: #242b36;
+                border: 1px solid #374151;
+                min-height: 30px;
+                padding: 6px 14px;
+                font-weight: 700;
+            }
+            QPushButton#WorkflowSubNavButton:checked {
+                background: #0f766e;
+                border-color: #5eead4;
+                color: #ffffff;
             }
             QFrame#FlowNavBar {
                 background: #20262f;
@@ -2128,7 +2403,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, "gpu_status_label"):
             mode = "可用" if self.ai_env.ai_ready else "未就绪"
             self.gpu_status_label.setText(f"AI状态：{mode}")
+        if hasattr(self, "model_default_label"):
+            self.model_default_label.setText(self._model_default_text())
         self.ai_analyze_button.setEnabled(bool(self.items))
+        self.model_auto_group_button.setEnabled(bool(self.items))
         self.current_ai_button.setEnabled(bool(self.items))
         self.reanalyze_unconfirmed_button.setEnabled(bool(self.items))
         self.clear_stale_ai_button.setEnabled(bool(self.items))
@@ -2330,6 +2608,7 @@ class MainWindow(QMainWindow):
         self.count_label.setText(f"已完成：{len(items)} / {len(items)}")
         self.work_progress.setValue(100 if items else 0)
         self.update_export_stats()
+        self.update_ai_result_overview()
         self.refresh_similarity_panel()
         self.background_ask_prompted = False
         if skipped:
@@ -2359,6 +2638,7 @@ class MainWindow(QMainWindow):
         self.cancel_import_button.setEnabled(running)
         self.current_ai_button.setEnabled(False if running else bool(self.items))
         self.ai_analyze_button.setEnabled(False if running else bool(self.items))
+        self.model_auto_group_button.setEnabled(False if running else bool(self.items))
         self.reanalyze_unconfirmed_button.setEnabled(False if running else bool(self.items))
         self.clear_stale_ai_button.setEnabled(False if running else bool(self.items))
         self.reanalyze_current_suggestion_button.setEnabled(False if running else bool(self.items))
@@ -2614,12 +2894,49 @@ class MainWindow(QMainWindow):
         saved = self.save_manual_review(item.path, review_data)
         if saved:
             self._review_controls_dirty = False
-            self.review_status_label.setText(f"审片状态：{review_data['review_status']}")
-            self.manual_label.setText(f"人工分类：{_review_type_text(item)}")
+            self.review_status_label.setText(f"系统状态：审片状态：{review_data['review_status']}")
+            self.manual_label.setText(f"人工确认：{_review_type_text(item)} / {_quality_rating_text(item.quality_rating)}")
             self.preview_info_label.setText(self._preview_info_text(item))
+            self._maybe_record_preference_sample(item, review_data)
+            self._refresh_workflow_contexts()
             if not quiet:
                 self.log(f"已保存人工判断：{item.filename}")
         return saved
+
+    def _maybe_record_preference_sample(self, item: PhotoItem, review_data: dict) -> None:
+        if not hasattr(self, "preference_record_checkbox") or not self.preference_record_checkbox.isChecked():
+            return
+        if review_data.get("review_status") != REVIEW_STATUS_HUMAN_CONFIRMED:
+            return
+        user_label = (
+            review_data.get("quality_rating")
+            or "、".join(review_data.get("delivery_use") or [])
+            or review_data.get("photo_type")
+            or "人工确认"
+        )
+        ai_suggestion = item.final_recommendation or item.ai_category_path or item.ai_primary_category or ""
+        adopted = bool(ai_suggestion and (ai_suggestion in str(user_label) or str(user_label) in ai_suggestion))
+        reason_tag = self.preference_reason_combo.currentText() if hasattr(self, "preference_reason_combo") else ""
+        decision_key = json.dumps(
+            {
+                "path": str(item.path),
+                "label": user_label,
+                "reason": reason_tag,
+                "ai": ai_suggestion,
+                "delivery": review_data.get("delivery_use") or [],
+                "issues": review_data.get("issue_tags") or [],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if decision_key == self._last_preference_record_key:
+            return
+        self._last_preference_record_key = decision_key
+        record_preference_sample(
+            item,
+            str(user_label),
+            f"人工修正；AI原建议：{ai_suggestion or '-'}；是否采纳AI：{'是' if adopted else '否'}；修改原因标签：{reason_tag or '-'}",
+        )
 
     @Slot(str)
     def on_photo_type_changed(self, photo_type: str) -> None:
@@ -2761,9 +3078,9 @@ class MainWindow(QMainWindow):
 
     def _preview_info_text(self, item: PhotoItem) -> str:
         return (
-            f"{item.filename} | {_review_type_text(item)} | "
-            f"{_quality_rating_text(item.quality_rating)} | "
-            f"{_join_values(item.delivery_use)} | {_review_status_text(item)}"
+            f"{item.filename} | AI建议：{item.ai_category_path or item.final_recommendation or '-'} | "
+            f"人工确认：{_review_type_text(item)} / {_quality_rating_text(item.quality_rating)} | "
+            f"人工用途：{_join_values(item.delivery_use)} | 系统状态：{_review_status_text(item)}"
         )
 
     def show_item(self, item: PhotoItem) -> None:
@@ -2775,9 +3092,9 @@ class MainWindow(QMainWindow):
         total = len(self.items)
         current = self.current_source_index + 1 if 0 <= self.current_source_index < total else 0
         self.review_sequence_label.setText(f"当前序号：第 {current} 张 / 共 {total} 张" if current else f"当前序号：- / 共 {total} 张")
-        self.review_status_label.setText(f"审片状态：{_review_status_text(item)}")
-        self.manual_label.setText(f"人工分类：{_review_type_text(item)}")
-        self.final_label.setText(f"最终导出：{item.export_category}")
+        self.review_status_label.setText(f"系统状态：审片状态：{_review_status_text(item)}")
+        self.manual_label.setText(f"人工确认：{_review_type_text(item)} / {_quality_rating_text(item.quality_rating)}")
+        self.final_label.setText(f"系统导出分类（人工优先）：{item.export_category}")
         self.notes_edit.setPlainText(item.user_note)
         self.review_ai_suggestion_label.setText(self._ai_suggestion_text(item))
         self.reanalyze_current_suggestion_button.setEnabled(True)
@@ -2788,27 +3105,32 @@ class MainWindow(QMainWindow):
         self.load_single_preview(item)
         self.preview_info_label.setText(self._preview_info_text(item))
         self.update_current_status()
+        self._refresh_workflow_contexts()
+        self.update_ai_result_overview()
         self._loading_details = False
 
     def update_current_status(self) -> None:
         total = len(self.items)
         if total <= 0:
             self.current_status_label.setText("当前：第 0 张 / 共 0 张")
+            self._refresh_workflow_contexts()
             return
         if not (0 <= self.current_source_index < total):
             self.current_status_label.setText(f"当前：未选择 / 共 {total} 张")
+            self._refresh_workflow_contexts()
             return
         current = max(1, min(self.current_source_index + 1, total))
         self.current_status_label.setText(f"当前：第 {current} 张 / 共 {total} 张")
+        self._refresh_workflow_contexts()
 
     def _show_ai_details(self, item: PhotoItem) -> None:
         ai_payload = self._current_ai_payload(item)
         analysis_for_modules = ai_payload if ai_payload else None
         if ai_payload:
-            self.ai_labels["ai_path"].setText(f"AI推荐分类：{item.ai_category_path or '-'}")
-            self.ai_labels["primary"].setText(f"一级分类：{item.ai_primary_category or '-'}")
-            self.ai_labels["secondary"].setText(f"二级分类：{item.ai_secondary_category or '-'}")
-            self.ai_labels["quality"].setText(f"质量标签：{', '.join(item.ai_quality_tags) or '-'}")
+            self.ai_labels["ai_path"].setText(f"AI业务类型建议：{item.ai_category_path or '-'}")
+            self.ai_labels["primary"].setText(f"AI一级建议：{item.ai_primary_category or '-'}")
+            self.ai_labels["secondary"].setText(f"AI二级建议：{item.ai_secondary_category or '-'}")
+            self.ai_labels["quality"].setText(f"AI质量标签：{', '.join(item.ai_quality_tags) or '-'}")
             self.ai_labels["confidence"].setText(f"置信度：{item.ai_confidence_text}")
             self.ai_labels["source"].setText(f"识别来源：{item.ai_source or '-'}")
             self.ai_labels["top3"].setText(f"语义Top3：{', '.join(item.top3_semantic_matches) or '-'}")
@@ -2824,10 +3146,10 @@ class MainWindow(QMainWindow):
             self.ai_labels["retouchable"].setText(f"是否可修：{'是' if item.retouch_suggestion else '-'}")
             self.ai_labels["croppable"].setText(f"是否可裁切：{'是' if item.crop_suggestion else '-'}")
         else:
-            self.ai_labels["ai_path"].setText("AI推荐分类：-")
-            self.ai_labels["primary"].setText("一级分类：-")
-            self.ai_labels["secondary"].setText("二级分类：-")
-            self.ai_labels["quality"].setText("质量标签：-")
+            self.ai_labels["ai_path"].setText("AI业务类型建议：-")
+            self.ai_labels["primary"].setText("AI一级建议：-")
+            self.ai_labels["secondary"].setText("AI二级建议：-")
+            self.ai_labels["quality"].setText("AI质量标签：-")
             self.ai_labels["confidence"].setText("置信度：-")
             self.ai_labels["source"].setText("识别来源：-")
             self.ai_labels["top3"].setText("语义Top3：-")
@@ -2845,13 +3167,19 @@ class MainWindow(QMainWindow):
             "review": "待复核",
             "rejected": "组内淘汰",
         }.get(item.similar_group_status, item.similar_group_status or "-")
-        group = (
-            f"{item.similar_group_id}（本组共 {item.similar_group_size} 张，状态：{status_text}，"
-            f"AI推荐：{'是' if item.ai_recommended_best else '否'}）"
+        human_group = (
+            f"人工相似组 {item.similar_group_id}（本组共 {item.similar_group_size} 张，人工状态：{status_text}，"
+            f"AI组内最佳建议：{'是' if item.ai_recommended_best else '否'}）"
             if item.similar_group_id
-            else "-"
+            else "人工相似组：-"
         )
-        self.ai_labels["similar"].setText(f"相似组ID：{group}")
+        auto_group = (
+            f"AI相似候选组 {item.auto_group_id}（共 {item.auto_group_size} 张，置信度 {item.auto_group_confidence:.2f}，"
+            f"方法：{item.grouping_method or '-'}）"
+            if item.auto_group_id
+            else "AI相似候选组：-"
+        )
+        self.ai_labels["similar"].setText(f"{auto_group}\n{human_group}")
         self.ai_labels["absolute_score"].setText(f"绝对质量分：{item.absolute_quality_score:.1f}" if item.absolute_quality_score else "绝对质量分：-")
         self.ai_labels["relative_score"].setText(f"相对质量分：{item.relative_quality_score:.1f}" if item.relative_quality_score else "相对质量分：-")
         rank = f"{item.group_rank}/{item.group_size}" if item.group_rank and item.group_size else "-"
@@ -2868,7 +3196,7 @@ class MainWindow(QMainWindow):
         self.ai_labels["crop_suggestion"].setText(f"裁切建议：{item.crop_suggestion or '-'}" if ai_payload else "裁切建议：-")
         self.ai_labels["portfolio_suggestion"].setText(f"作品建议：{item.portfolio_suggestion or '-'}" if ai_payload else "作品建议：-")
         self.ai_labels["delivery_suggestion"].setText(f"交付建议：{item.delivery_suggestion or '-'}" if ai_payload else "交付建议：-")
-        self.ai_labels["final_recommendation"].setText(f"最终建议：{item.final_recommendation or item.export_category}" if ai_payload else "最终建议：-")
+        self.ai_labels["final_recommendation"].setText(f"AI评分建议：{item.final_recommendation or '-'}" if ai_payload else "AI评分建议：-")
         self.ai_labels["module_basic"].setText("基础质量：\n" + module_summary_text(analysis_for_modules, "basic_quality"))
         self.ai_labels["module_face"].setText("人脸状态：\n" + module_summary_text(analysis_for_modules, "face"))
         self.ai_labels["module_pose"].setText("肢体姿态：\n" + module_summary_text(analysis_for_modules, "pose"))
@@ -3135,6 +3463,30 @@ class MainWindow(QMainWindow):
             )
             self._refresh_background_buttons(TASK_STATUS_RUNNING)
 
+    def start_model_auto_group_ui(self) -> None:
+        if not self.items:
+            QMessageBox.information(self, "AI相似候选组", "请先导入照片。")
+            return
+        if self.background_task_manager.is_running():
+            QMessageBox.information(self, "AI相似候选组", "后台任务正在运行，请等待完成或先停止当前任务。")
+            return
+        reply = QMessageBox.question(
+            self,
+            "生成 AI 相似候选组",
+            "模型自动分组结果只是选片建议，不会覆盖人工相似组状态，也不会移动或删除原图。\n\n是否开始生成 AI 相似候选组？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.background_task_manager.set_tasks(build_background_tasks([TASK_MODEL_AUTO_GROUP], self.items))
+        started = self.background_task_manager.start(self.items, self.config, self.selected_folder)
+        if started:
+            self._activate_workflow_section("ai", persist=False)
+            self.stage_label.setText("阶段：生成 AI 相似候选组")
+            self.log("已开始生成 AI 相似候选组；结果仅写入 auto_group_* 建议字段。")
+            self._refresh_background_buttons(TASK_STATUS_RUNNING)
+
     def start_current_ai(self) -> None:
         if self.current_source_index < 0:
             return
@@ -3299,6 +3651,69 @@ class MainWindow(QMainWindow):
             counter[key] += 1
         return counter
 
+    def _ai_score_bucket(self, item: PhotoItem) -> str:
+        if not (item.ai_primary_category or item.ai_confidence or item.final_pick_score or item.absolute_quality_score):
+            return "无法判断"
+        score = item.final_pick_score or item.absolute_quality_score or item.relative_quality_score or 0
+        if score >= 90:
+            return "S 强烈推荐"
+        if score >= 75:
+            return "A 可交付"
+        if score >= 60:
+            return "B 备选"
+        if score >= 40:
+            return "C 留档/练习"
+        return "无法判断"
+
+    def _ai_result_overview(self) -> dict:
+        score_counter = Counter({"S 强烈推荐": 0, "A 可交付": 0, "B 备选": 0, "C 留档/练习": 0, "无法判断": 0})
+        business_counter = Counter()
+        auto_groups: dict[str, list[PhotoItem]] = {}
+        for item in self.items:
+            score_counter[self._ai_score_bucket(item)] += 1
+            business_counter[item.ai_primary_category or "无法判断"] += 1
+            if item.auto_group_id:
+                auto_groups.setdefault(item.auto_group_id, []).append(item)
+        grouped_photos = sum(len(group_items) for group_items in auto_groups.values())
+        singleton_count = max(0, len(self.items) - grouped_photos)
+        high_risk = sum(
+            1
+            for group_items in auto_groups.values()
+            if any("high_risk" in (item.auto_group_reason or "") or "过度合并" in (item.auto_group_reason or "") for item in group_items)
+        )
+        return {
+            "score_counter": score_counter,
+            "business_counter": business_counter,
+            "auto_group_count": len(auto_groups),
+            "auto_group_photo_count": grouped_photos,
+            "singleton_count": singleton_count,
+            "high_risk_count": high_risk,
+        }
+
+    def update_ai_result_overview(self) -> None:
+        if not hasattr(self, "ai_score_overview_label"):
+            return
+        overview = self._ai_result_overview()
+        score_counter = overview["score_counter"]
+        business_counter = overview["business_counter"]
+        analyzed = sum(1 for item in self.items if item.ai_primary_category or item.ai_confidence or item.ai_suggestion)
+        self.ai_progress_summary_label.setText(
+            f"进度：已分析 {analyzed}/{len(self.items)}；后台任务会显示成功 / 跳过 / 失败、GPU/CPU 和 cache 命中。"
+        )
+        self.ai_score_overview_label.setText(
+            "A. AI评分建议（非人工结论）：\n"
+            f"S 强烈推荐 {score_counter['S 强烈推荐']}｜A 可交付 {score_counter['A 可交付']}｜"
+            f"B 备选 {score_counter['B 备选']}｜C 留档/练习 {score_counter['C 留档/练习']}｜"
+            f"无法判断 {score_counter['无法判断']}"
+        )
+        self.ai_group_overview_label.setText(
+            "B. AI相似候选组（非人工重复）：\n"
+            f"候选组 {overview['auto_group_count']}｜候选组照片 {overview['auto_group_photo_count']}｜"
+            f"单张照片 {overview['singleton_count']}｜高风险组 {overview['high_risk_count']}"
+        )
+        business_lines = "｜".join(f"{name} {count}" for name, count in business_counter.most_common(6))
+        self.ai_business_overview_label.setText(f"C. 业务类型建议（非人工分类）：\n{business_lines or '暂无'}")
+
     def _workflow_category_counter(self) -> Counter:
         counter = Counter({"强烈推荐": 0, "可交付": 0, "备选": 0, "重复": 0, "废片": 0})
         for item in self.items:
@@ -3325,18 +3740,20 @@ class MainWindow(QMainWindow):
         return counter
 
     def _analysis_stats_text(self, elapsed_ms: float | None = None) -> str:
-        counter = self._workflow_category_counter()
+        overview = self._ai_result_overview()
+        score_counter = overview["score_counter"]
         elapsed_text = "-"
         if elapsed_ms is not None and elapsed_ms > 0:
             seconds = int(elapsed_ms / 1000)
             elapsed_text = f"{seconds // 60:02d}:{seconds % 60:02d}"
         lines = [
             f"总照片数：{len(self.items)}",
-            f"强烈推荐：{counter['强烈推荐']}",
-            f"可交付：{counter['可交付']}",
-            f"备选：{counter['备选']}",
-            f"重复：{counter['重复']}",
-            f"废片：{counter['废片']}",
+            f"AI S 强烈推荐建议：{score_counter['S 强烈推荐']}",
+            f"AI A 可交付建议：{score_counter['A 可交付']}",
+            f"AI B 备选建议：{score_counter['B 备选']}",
+            f"AI C 留档/练习建议：{score_counter['C 留档/练习']}",
+            f"AI 无法判断：{score_counter['无法判断']}",
+            f"AI相似候选组：{overview['auto_group_count']} 组 / {overview['auto_group_photo_count']} 张",
             f"用时：{elapsed_text}",
         ]
         return "\n".join(lines)
@@ -3345,6 +3762,7 @@ class MainWindow(QMainWindow):
         elapsed_ms = self.last_ai_performance.get("total_ms")
         text = self._analysis_stats_text(elapsed_ms)
         self.analysis_stats_label.setText("分析统计：\n" + text.replace("\n", "    "))
+        self.update_ai_result_overview()
         title = "AI分析已取消" if cancelled else "AI分析完成"
         QMessageBox.information(self, title, text)
 
@@ -3367,16 +3785,17 @@ class MainWindow(QMainWindow):
             return
         counter = self._analysis_counter()
         total = len(self.items)
-        duplicate = sum(1 for item in self.items if item.similar_group_id)
+        overview = self._ai_result_overview()
         analyzed = sum(1 for item in self.items if item.ai_primary_category or item.ai_confidence)
         workflow_text = self._analysis_stats_text(self.last_ai_performance.get("total_ms"))
         lines = [
-            "工作流统计：",
+            "AI分析统计（建议，不是人工确认）：",
             workflow_text,
             "",
             f"总照片数：{total}",
             f"已 AI 分析：{analyzed}",
-            f"相似组照片：{duplicate}",
+            f"AI相似候选组：{overview['auto_group_count']} 组 / {overview['auto_group_photo_count']} 张",
+            f"人工相似组照片：{sum(1 for item in self.items if item.similar_group_id)}",
             "",
             "分类统计：",
         ]
@@ -3388,7 +3807,7 @@ class MainWindow(QMainWindow):
                 "",
                 f"人工备选比例：{pending_count / total:.0%}",
                 f"目标精选比例：{self.config.target_pick_ratio:.0%}",
-                "提示：AI 不再默认把不确定照片归为备选，而是优先进入人工复核、可交付、重复或废片疑似等业务分类。",
+                "提示：AI结果只是建议；人工确认后才会成为交付、备选、重复或废片等工作流结论。",
             ]
         )
         QMessageBox.information(self, "AI分析统计", "\n".join(lines))
@@ -3401,6 +3820,7 @@ class MainWindow(QMainWindow):
     def _set_ai_running(self, running: bool) -> None:
         self.ai_analyze_button.setEnabled(not running and bool(self.items))
         self.current_ai_button.setEnabled(not running and bool(self.items))
+        self.model_auto_group_button.setEnabled(not running and bool(self.items))
         self.reanalyze_unconfirmed_button.setEnabled(not running and bool(self.items))
         self.clear_stale_ai_button.setEnabled(not running and bool(self.items))
         self.reanalyze_current_suggestion_button.setEnabled(not running and bool(self.items))
@@ -3516,8 +3936,16 @@ class MainWindow(QMainWindow):
         if self.current_source_index < 0:
             return
         item = self.items[self.current_source_index]
-        record_preference_sample(item, item.manual_category, "用户点击记录偏好")
-        item.user_label = item.manual_category
+        reason_tag = self.preference_reason_combo.currentText() if hasattr(self, "preference_reason_combo") else ""
+        user_label = item.quality_rating or item.manual_category or _join_values(item.delivery_use) or item.photo_type or "人工确认"
+        ai_suggestion = item.final_recommendation or item.ai_category_path or item.ai_primary_category or ""
+        adopted = bool(ai_suggestion and (ai_suggestion in user_label or user_label in ai_suggestion))
+        record_preference_sample(
+            item,
+            user_label,
+            f"用户点击记录偏好；AI原建议：{ai_suggestion or '-'}；是否采纳AI：{'是' if adopted else '否'}；修改原因标签：{reason_tag or '-'}",
+        )
+        item.user_label = user_label
         item.user_label_time = datetime.now().isoformat(timespec="seconds")
         self.save_item(item)
         self.mark_dirty("记录用户偏好标签")
@@ -3701,6 +4129,7 @@ class MainWindow(QMainWindow):
         self.cancel_model_download_button.setEnabled(running)
         self.select_folder_button.setEnabled(not running)
         self.ai_analyze_button.setEnabled(not running and bool(self.items))
+        self.model_auto_group_button.setEnabled(not running and bool(self.items))
         self.reanalyze_unconfirmed_button.setEnabled(not running and bool(self.items))
         self.clear_stale_ai_button.setEnabled(not running and bool(self.items))
 
@@ -4042,6 +4471,7 @@ class MainWindow(QMainWindow):
         self.open_report_button.setEnabled(not running and bool(self.last_report_path and self.last_report_path.exists()))
         self.select_folder_button.setEnabled(not running)
         self.ai_analyze_button.setEnabled(not running and bool(self.items))
+        self.model_auto_group_button.setEnabled(not running and bool(self.items))
         self.reanalyze_unconfirmed_button.setEnabled(not running and bool(self.items))
         self.clear_stale_ai_button.setEnabled(not running and bool(self.items))
         self.reanalyze_current_suggestion_button.setEnabled(not running and bool(self.items))
@@ -4352,6 +4782,7 @@ class MainWindow(QMainWindow):
         self._update_background_status(task)
         if task.task_type in {TASK_THUMBNAIL_CACHE, TASK_SIMILAR_PHOTOS, TASK_MODEL_AUTO_GROUP}:
             self.model.refresh()
+            self.update_ai_result_overview()
         if task.task_type == TASK_SIMILAR_PHOTOS:
             self.refresh_similarity_panel()
         self.log(f"后台任务完成：{task.task_name}")
@@ -4374,6 +4805,7 @@ class MainWindow(QMainWindow):
             self.show_item(self.items[self.current_source_index])
         self.rebuild_similarity_group_list()
         self.update_export_stats()
+        self.update_ai_result_overview()
         final_status = TASK_STATUS_COMPLETED
         if any(task.status == TASK_STATUS_ERROR for task in tasks):
             final_status = TASK_STATUS_ERROR
