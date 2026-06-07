@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
+from PIL import Image
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QFrame, QGroupBox, QLabel
 
@@ -22,10 +24,15 @@ def _app() -> QApplication:
 
 
 def _make_photo(name: str = "a.jpg") -> PhotoItem:
+    image_dir = Path(tempfile.gettempdir()) / "photoselect_layout_test_images"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    image_path = image_dir / name
+    if not image_path.exists():
+        Image.new("RGB", (8, 8), color=(128, 128, 128)).save(image_path)
     return PhotoItem(
-        path=Path(name),
+        path=image_path,
         filename=name,
-        thumbnail_path=Path(name),
+        thumbnail_path=image_path,
         width=1200,
         height=800,
         file_size_mb=1.0,
@@ -58,6 +65,8 @@ def test_main_window_modular_layout() -> None:
         assert window.nav_buttons["review"].text() == "3. 审核与修正"
         assert window.nav_buttons["export"].text() == "4. 导出与整理"
         assert window.top_settings_button.text() == "设置"
+        assert "成功" not in window.top_background_status_label.text()
+        assert "失败" not in window.top_background_status_label.text()
 
         expected_pages = {
             "project": "ProjectImportPage",
@@ -118,6 +127,8 @@ def test_project_home_empty_state_and_dashboard_visibility() -> None:
         assert window.advanced_settings_group.isHidden()
         assert not window.advanced_settings_widget.isVisible()
         assert all(widget.isHidden() for widget in window.workflow_header_widgets["project"])
+        assert window._workflow_state()["step"] == "等待导入"
+        assert "等待导入" in window.workflow_step_label.text()
 
         window.selected_folder = Path("demo_project")
         window.items = [_make_photo("001.jpg"), _make_photo("002.jpg")]
@@ -132,14 +143,20 @@ def test_project_home_empty_state_and_dashboard_visibility() -> None:
         assert all(not widget.isHidden() for widget in window.workflow_header_widgets["project"])
         assert window.dashboard_total_value.text() == "2"
         assert window.next_step_button.text() == "开始 AI 分析"
+        assert window._workflow_state()["step"] == "等待 AI 分析"
+        assert "等待 AI 分析" in window.workflow_step_label.text()
 
         window.items[0].ai_suggestion = '{"version": "business_classifier_v2"}'
         window.update_project_dashboard()
         assert window.next_step_button.text() == "进入审核与修正"
+        assert window._workflow_state()["step"] == "等待人工审核"
+        assert "等待人工审核" in window.workflow_step_label.text()
 
         window.items[0].review_status = REVIEW_STATUS_HUMAN_CONFIRMED
         window.update_project_dashboard()
         assert window.next_step_button.text() == "导出与整理"
+        assert window._workflow_state()["step"] == "可以导出"
+        assert "可以导出" in window.workflow_step_label.text()
     finally:
         window.close()
         app.processEvents()
@@ -169,6 +186,7 @@ def test_empty_states_hide_inactive_controls() -> None:
 
         assert not window.ai_empty_state_wrapper.isHidden()
         assert window.ai_empty_state_card.maximumWidth() <= 700
+        assert window.ai_completion_card.isHidden()
         assert window.ai_action_group.isHidden()
         assert window.ai_overview_group.isHidden()
         assert "尚未运行 AI 分析" in _label_texts(window.ai_empty_state_card)
@@ -179,6 +197,7 @@ def test_empty_states_hide_inactive_controls() -> None:
         assert not window.export_empty_state_wrapper.isHidden()
         assert window.export_empty_state_card.maximumWidth() <= 700
         assert window.export_controls_widget.isHidden()
+        assert window.export_check_card.isHidden()
         assert window.export_safety_group.isHidden()
         assert window.export_empty_review_button.text() == "进入审核与修正"
         assert window.export_empty_review_button.objectName() == "PrimaryButton"
@@ -199,6 +218,7 @@ def test_empty_states_hide_inactive_controls() -> None:
         window.update_project_dashboard()
         assert window.export_empty_state_wrapper.isHidden()
         assert not window.export_controls_widget.isHidden()
+        assert not window.export_check_card.isHidden()
         assert not window.export_safety_group.isHidden()
     finally:
         window.close()
@@ -238,6 +258,85 @@ def test_workflow_labels_separate_ai_and_human_states() -> None:
         settings.sync()
 
 
+def test_dashboard_cards_and_completion_actions_navigate_workflow() -> None:
+    settings = QSettings("PhotoSelectAI", "PhotoSelectAIAssistant")
+    settings.clear()
+    settings.sync()
+    app = _app()
+    window = MainWindow()
+    try:
+        first = _make_photo("001.jpg")
+        second = _make_photo("002.jpg")
+        first.ai_suggestion = '{"version": "business_classifier_v2"}'
+        first.quality_rating = "A"
+        first.auto_group_id = "auto_001"
+        first.review_status = REVIEW_STATUS_HUMAN_CONFIRMED
+        first.delivery_use = ["客户可选"]
+        window.items = [first, second]
+        window.model.set_items(window.items)
+        window.update_project_dashboard()
+        window.update_ai_result_overview()
+
+        window.dashboard_ai_card.clicked.emit()
+        assert window.current_main_section == "ai"
+        assert window.main_stack.currentWidget().objectName() == "AIAnalysisPage"
+
+        window.dashboard_manual_card.clicked.emit()
+        assert window.current_main_section == "review"
+        assert window.review_stack.currentWidget().objectName() == "ReviewWorkspacePage"
+
+        window.dashboard_group_card.clicked.emit()
+        assert window.current_main_section == "review"
+        assert window.review_stack.currentWidget().objectName() == "SimilarGroupPage"
+
+        window.dashboard_export_card.clicked.emit()
+        assert window.current_main_section == "export"
+        assert window.main_stack.currentWidget().objectName() == "ExportReviewPage"
+
+        assert not window.ai_completion_card.isHidden()
+        assert "已分析照片数" in window.ai_completion_summary_label.text()
+        window.ai_completion_review_button.click()
+        assert window.current_main_section == "review"
+    finally:
+        window.close()
+        app.processEvents()
+        settings.clear()
+        settings.sync()
+
+
+def test_review_progress_navigation_and_filters() -> None:
+    settings = QSettings("PhotoSelectAI", "PhotoSelectAIAssistant")
+    settings.clear()
+    settings.sync()
+    app = _app()
+    window = MainWindow()
+    try:
+        first = _make_photo("001.jpg")
+        first.review_status = REVIEW_STATUS_HUMAN_CONFIRMED
+        first.quality_rating = "A"
+        second = _make_photo("002.jpg")
+        second.review_status = REVIEW_STATUS_UNREVIEWED
+        second.auto_group_id = "auto_001"
+        window.items = [first, second]
+        window.model.set_items(window.items)
+        window.select_source_index(0)
+        window.update_project_dashboard()
+
+        assert "已人工确认 1 / 总数 2" in window.review_progress_label.text()
+        window.next_unreviewed_button.click()
+        assert window.current_source_index == 1
+
+        window.filter_ai_a_button.click()
+        assert window.filter_combo.currentText() == "AI：A 可交付建议"
+        window.filter_unconfirmed_button.click()
+        assert window.filter_combo.currentText() == "人工：未确认"
+    finally:
+        window.close()
+        app.processEvents()
+        settings.clear()
+        settings.sync()
+
+
 def test_filter_terms_do_not_mix_ai_suggestion_and_human_workflow() -> None:
     model = PhotoListModel()
     manual_deliverable = _make_photo("a.jpg")
@@ -269,5 +368,7 @@ if __name__ == "__main__":
     test_project_home_empty_state_and_dashboard_visibility()
     test_empty_states_hide_inactive_controls()
     test_workflow_labels_separate_ai_and_human_states()
+    test_dashboard_cards_and_completion_actions_navigate_workflow()
+    test_review_progress_navigation_and_filters()
     test_filter_terms_do_not_mix_ai_suggestion_and_human_workflow()
     print("main window layout tests passed")
