@@ -791,8 +791,8 @@ class MainWindow(QMainWindow):
     def _build_page_shell(self, title: str, hint: str, context_key: str) -> tuple[QWidget, QVBoxLayout]:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
         title_label = QLabel(title)
         title_label.setObjectName("WorkflowPageTitle")
         title_label.setWordWrap(True)
@@ -810,12 +810,99 @@ class MainWindow(QMainWindow):
 
     def _build_import_settings_page(self, project_widget: QWidget, settings_widget: QWidget) -> QWidget:
         page, layout = self._build_page_shell(
-            "1. 导入与设置",
-            "先选择照片文件夹，再告诉软件这批照片的大致业务场景和处理目标。高级参数默认折叠，避免干扰审片。",
+            "1. 导入与设置 · 项目中心",
+            "从这里建立项目、确认本批照片业务目标，并查看整体进度。没有导入照片时，先按项目建立向导走一遍。",
             "project",
         )
-        setup_group = QGroupBox("基础业务设置")
-        setup_layout = QGridLayout(setup_group)
+
+        self.project_landing_container = QWidget()
+        landing_layout = QVBoxLayout(self.project_landing_container)
+        landing_layout.setContentsMargins(0, 0, 0, 0)
+        landing_layout.setSpacing(14)
+
+        hero_card, hero_layout = self._make_card("", "HeroCard")
+        hero_title = QLabel("PhotoSelect AI Assistant")
+        hero_title.setObjectName("HeroTitle")
+        hero_subtitle = QLabel("AI辅助摄影选片、相似候选组、人工审核与安全导出")
+        hero_subtitle.setObjectName("HeroSubtitle")
+        hero_subtitle.setWordWrap(True)
+        self.project_empty_state_label = QLabel("建立一个选片项目后，软件会保留照片上下文，并引导你完成 AI 分析、人工审核和导出。")
+        self.project_empty_state_label.setWordWrap(True)
+        self.project_empty_state_label.setObjectName("EmptyStateBody")
+        hero_buttons = QHBoxLayout()
+        self.hero_new_project_button = self._make_button("新建选片项目", "选择照片文件夹并建立新项目。")
+        self.hero_open_project_button = self._make_button("打开已有项目", "打开一个已有照片文件夹或项目目录。")
+        self.hero_continue_project_button = self._make_button("继续上次项目", "恢复上次筛片项目。")
+        self.hero_new_project_button.setObjectName("PrimaryButton")
+        self.hero_open_project_button.setObjectName("SecondaryButton")
+        self.hero_continue_project_button.setObjectName("SecondaryButton")
+        hero_buttons.addWidget(self.hero_new_project_button)
+        hero_buttons.addWidget(self.hero_open_project_button)
+        hero_buttons.addWidget(self.hero_continue_project_button)
+        hero_buttons.addStretch(1)
+        hero_layout.addWidget(hero_title)
+        hero_layout.addWidget(hero_subtitle)
+        hero_layout.addWidget(self.project_empty_state_label)
+        hero_layout.addLayout(hero_buttons)
+        landing_layout.addWidget(hero_card)
+
+        action_grid = QGridLayout()
+        action_grid.setSpacing(12)
+        for index, (title, body) in enumerate(
+            [
+                ("导入照片", "选择照片文件夹并建立项目。原图只读取，不删除。"),
+                ("AI 分析", "生成评分建议、业务类型和 AI 相似候选组。"),
+                ("人工审核与导出", "人工确认后安全复制/导出整理结果。"),
+            ]
+        ):
+            card, card_layout = self._make_card(title, "ActionCard")
+            body_label = QLabel(body)
+            body_label.setObjectName("MetricNote")
+            body_label.setWordWrap(True)
+            card_layout.addWidget(body_label)
+            action_grid.addWidget(card, 0, index)
+        landing_layout.addLayout(action_grid)
+
+        self.project_safety_card, safety_layout = self._make_card("安全边界", "SafetyNoticeCard")
+        safety_label = QLabel("默认不移动源文件｜AI结果只是建议｜人工确认后才导出")
+        safety_label.setObjectName("SafetyNoticeText")
+        safety_label.setWordWrap(True)
+        safety_layout.addWidget(safety_label)
+        landing_layout.addWidget(self.project_safety_card)
+        layout.addWidget(self.project_landing_container)
+
+        self.project_dashboard_card, dashboard_layout = self._make_card("项目 Dashboard", "DashboardCard")
+        dashboard_grid = QGridLayout()
+        self.dashboard_total_card, self.dashboard_total_value, self.dashboard_total_note = self._make_metric_card("照片总数", "0", "导入后显示")
+        self.dashboard_ai_card, self.dashboard_ai_value, self.dashboard_ai_note = self._make_metric_card("AI建议", "0", "已分析照片")
+        self.dashboard_manual_card, self.dashboard_manual_value, self.dashboard_manual_note = self._make_metric_card("人工确认", "0", "已确认/待复核")
+        self.dashboard_group_card, self.dashboard_group_value, self.dashboard_group_note = self._make_metric_card("AI相似候选组", "0", "仅为候选，不是人工重复")
+        self.dashboard_export_card, self.dashboard_export_value, self.dashboard_export_note = self._make_metric_card("导出准备", "0", "可导出用途数量")
+        for index, card in enumerate(
+            [
+                self.dashboard_total_card,
+                self.dashboard_ai_card,
+                self.dashboard_manual_card,
+                self.dashboard_group_card,
+                self.dashboard_export_card,
+            ]
+        ):
+            dashboard_grid.addWidget(card, index // 3, index % 3)
+        dashboard_layout.addLayout(dashboard_grid)
+        self.next_step_card, next_step_layout = self._make_card("下一步建议", "ActionCard")
+        self.next_step_label = QLabel("请先导入照片。")
+        self.next_step_label.setObjectName("EmptyStateBody")
+        self.next_step_label.setWordWrap(True)
+        self.next_step_button = self._make_button("新建选片项目", "根据当前状态执行下一步。")
+        self.next_step_button.setObjectName("PrimaryButton")
+        next_step_layout.addWidget(self.next_step_label)
+        next_step_layout.addWidget(self.next_step_button)
+        dashboard_layout.addWidget(self.next_step_card)
+        layout.addWidget(self.project_dashboard_card)
+
+        self.project_setup_group = QGroupBox("项目基础设置")
+        self.project_setup_group.setObjectName("WorkflowCard")
+        setup_layout = QGridLayout(self.project_setup_group)
         self.business_style_combo = QComboBox()
         self.business_style_combo.addItems(["婚纱写真", "个人写真", "情侣/双人写真", "家庭合影", "商务形象照", "会议/活动照", "混合/无法判断"])
         self.process_goal_combo = QComboBox()
@@ -825,18 +912,26 @@ class MainWindow(QMainWindow):
         self.model_strength_combo.setCurrentText("平衡：默认")
         self.model_default_label = QLabel(self._model_default_text())
         self.model_default_label.setWordWrap(True)
-        setup_layout.addWidget(QLabel("基础业务风格"), 0, 0)
-        setup_layout.addWidget(self.business_style_combo, 0, 1)
-        setup_layout.addWidget(QLabel("处理目标"), 1, 0)
-        setup_layout.addWidget(self.process_goal_combo, 1, 1)
-        setup_layout.addWidget(QLabel("模型强度"), 2, 0)
-        setup_layout.addWidget(self.model_strength_combo, 2, 1)
-        setup_layout.addWidget(QLabel("默认参数"), 3, 0)
-        setup_layout.addWidget(self.model_default_label, 3, 1)
-        layout.addWidget(setup_group)
-        layout.addWidget(project_widget)
+        setup_cards = [
+            ("业务风格", self.business_style_combo),
+            ("处理目标", self.process_goal_combo),
+            ("模型强度", self.model_strength_combo),
+        ]
+        for index, (title, widget) in enumerate(setup_cards):
+            card, card_layout = self._make_card(title, "ActionCard")
+            card_layout.addWidget(widget)
+            setup_layout.addWidget(card, 0, index)
+        defaults_card, defaults_layout = self._make_card("当前默认参数", "ActionCard")
+        defaults_layout.addWidget(self.model_default_label)
+        setup_layout.addWidget(defaults_card, 1, 0, 1, 3)
+        layout.addWidget(self.project_setup_group)
+
+        self.project_import_card, import_layout = self._make_card("项目操作", "DashboardCard")
+        import_layout.addWidget(project_widget)
+        layout.addWidget(self.project_import_card)
 
         self.advanced_settings_group = QGroupBox("高级设置 / 模型 / 调试")
+        self.advanced_settings_group.setObjectName("WorkflowCard")
         self.advanced_settings_group.setCheckable(True)
         self.advanced_settings_group.setChecked(False)
         advanced_layout = QVBoxLayout(self.advanced_settings_group)
@@ -853,13 +948,13 @@ class MainWindow(QMainWindow):
             "这里运行 AI 预分析和 AI 相似候选组。AI 结果只是建议，不等于人工确认结果。",
             "ai",
         )
-        action_group = QGroupBox("AI分析入口")
-        action_layout = QVBoxLayout(action_group)
+        self.ai_action_group = QGroupBox("AI分析入口")
+        action_layout = QVBoxLayout(self.ai_action_group)
         action_layout.addWidget(ai_widget)
-        layout.addWidget(action_group)
+        layout.addWidget(self.ai_action_group)
 
-        overview_group = QGroupBox("结果总览：AI建议，不是人工结论")
-        overview_layout = QGridLayout(overview_group)
+        self.ai_overview_group = QGroupBox("结果总览：AI建议，不是人工结论")
+        overview_layout = QGridLayout(self.ai_overview_group)
         self.ai_progress_summary_label = QLabel("进度：尚未运行 AI 分析。")
         self.ai_score_overview_label = QLabel("A. AI评分建议：暂无")
         self.ai_group_overview_label = QLabel("B. AI相似候选组：暂无")
@@ -875,7 +970,22 @@ class MainWindow(QMainWindow):
         overview_layout.addWidget(self.ai_score_overview_label, 1, 0)
         overview_layout.addWidget(self.ai_group_overview_label, 1, 1)
         overview_layout.addWidget(self.ai_business_overview_label, 2, 0, 1, 2)
-        layout.addWidget(overview_group)
+        layout.addWidget(self.ai_overview_group)
+        self.ai_empty_state_card, ai_empty_layout = self._make_card("还没有 AI 分析结果", "EmptyStateCard")
+        ai_empty_body = QLabel("导入照片后，先运行 AI 分析。AI 会生成评分建议、业务类型和相似候选组，但不会自动变成人工确认。")
+        ai_empty_body.setObjectName("EmptyStateBody")
+        ai_empty_body.setWordWrap(True)
+        self.ai_empty_start_button = self._make_button("开始 AI 分析", "批量分析未人工确认照片。")
+        self.ai_empty_start_button.setObjectName("PrimaryButton")
+        self.ai_empty_group_button = self._make_button("生成 AI 相似候选组", "使用模型 embedding 生成相似候选组建议。")
+        self.ai_empty_group_button.setObjectName("SecondaryButton")
+        ai_empty_buttons = QHBoxLayout()
+        ai_empty_buttons.addWidget(self.ai_empty_start_button)
+        ai_empty_buttons.addWidget(self.ai_empty_group_button)
+        ai_empty_buttons.addStretch(1)
+        ai_empty_layout.addWidget(ai_empty_body)
+        ai_empty_layout.addLayout(ai_empty_buttons)
+        layout.addWidget(self.ai_empty_state_card)
         layout.addStretch(1)
         return page
 
@@ -885,8 +995,8 @@ class MainWindow(QMainWindow):
             "导出默认只复制到新文件夹，并生成 CSV / Markdown 复盘报告。源文件移动默认关闭，且本版本不自动删除任何原图。",
             "export",
         )
-        safety_group = QGroupBox("源文件安全")
-        safety_layout = QVBoxLayout(safety_group)
+        self.export_safety_group = QGroupBox("源文件安全")
+        safety_layout = QVBoxLayout(self.export_safety_group)
         self.export_copy_safety_label = QLabel("推荐：复制到新文件夹 + 生成报告。人工“重复 / 废片 / 不导出”只影响导出清单，不会删除原图。")
         self.export_copy_safety_label.setWordWrap(True)
         self.move_source_checkbox = QCheckBox("高级：移动源文件分类（默认关闭，需要二次确认；当前版本不执行自动移动）")
@@ -898,7 +1008,17 @@ class MainWindow(QMainWindow):
         safety_layout.addWidget(self.export_copy_safety_label)
         safety_layout.addWidget(self.lr_c1_list_checkbox)
         safety_layout.addWidget(self.move_source_checkbox)
-        layout.addWidget(safety_group)
+        layout.addWidget(self.export_safety_group)
+        self.export_empty_state_card, export_empty_layout = self._make_card("还没有可导出的人工确认结果", "EmptyStateCard")
+        export_empty_body = QLabel("请先进入审核与修正，确认精修候选、客户可选、直接交付、仅留档、重复或废片等人工结果。")
+        export_empty_body.setObjectName("EmptyStateBody")
+        export_empty_body.setWordWrap(True)
+        self.export_empty_review_button = self._make_button("进入审核与修正", "进入人工审核工作台。")
+        self.export_empty_review_button.setObjectName("PrimaryButton")
+        export_empty_layout.addWidget(export_empty_body)
+        export_empty_layout.addWidget(self.export_empty_review_button)
+        layout.addWidget(self.export_empty_state_card)
+        self.export_controls_widget = export_widget
         layout.addWidget(export_widget)
         layout.addStretch(1)
         return page
@@ -909,6 +1029,46 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setWidget(widget)
         return scroll
+
+    def _make_card(self, title: str = "", object_name: str = "DashboardCard") -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame()
+        card.setObjectName(object_name)
+        card.setFrameShape(QFrame.StyledPanel)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+        if title:
+            label = QLabel(title)
+            label.setObjectName("CardTitle")
+            label.setWordWrap(True)
+            layout.addWidget(label)
+        return card, layout
+
+    def _make_metric_card(self, title: str, value: str = "0", note: str = "") -> tuple[QFrame, QLabel, QLabel]:
+        card, layout = self._make_card(title, "MetricCard")
+        value_label = QLabel(value)
+        value_label.setObjectName("MetricValue")
+        value_label.setWordWrap(True)
+        note_label = QLabel(note)
+        note_label.setObjectName("MetricNote")
+        note_label.setWordWrap(True)
+        layout.addWidget(value_label)
+        layout.addWidget(note_label)
+        layout.addStretch(1)
+        return card, value_label, note_label
+
+    def _build_empty_state_card(self, title: str, body: str, action_text: str = "") -> QFrame:
+        card, layout = self._make_card(title, "EmptyStateCard")
+        body_label = QLabel(body)
+        body_label.setObjectName("EmptyStateBody")
+        body_label.setWordWrap(True)
+        layout.addWidget(body_label)
+        if action_text:
+            action_label = QLabel(action_text)
+            action_label.setObjectName("EmptyStateAction")
+            action_label.setWordWrap(True)
+            layout.addWidget(action_label)
+        return card
 
     def _build_top_status_bar(self) -> QWidget:
         bar = QFrame()
@@ -990,6 +1150,70 @@ class MainWindow(QMainWindow):
             label.setText(text)
         if hasattr(self, "model_default_label"):
             self.model_default_label.setText(self._model_default_text())
+        self.update_project_dashboard()
+
+    def update_project_dashboard(self) -> None:
+        if not hasattr(self, "dashboard_total_value"):
+            return
+        total = len(self.items)
+        analyzed = sum(1 for item in self.items if item.ai_suggestion or item.ai_primary_category or item.ai_confidence)
+        human_confirmed = sum(1 for item in self.items if item.review_status == REVIEW_STATUS_HUMAN_CONFIRMED)
+        needs_review = sum(1 for item in self.items if item.review_status == REVIEW_STATUS_NEEDS_REVIEW)
+        auto_group_ids = {item.auto_group_id for item in self.items if item.auto_group_id}
+        export_ready = sum(1 for item in self.items if item.delivery_use and "不导出" not in item.delivery_use)
+        has_project = total > 0
+        if hasattr(self, "project_landing_container"):
+            self.project_landing_container.setVisible(not has_project)
+        if hasattr(self, "project_dashboard_card"):
+            self.project_dashboard_card.setVisible(has_project)
+        if hasattr(self, "project_setup_group"):
+            self.project_setup_group.setVisible(has_project)
+        if hasattr(self, "project_import_card"):
+            self.project_import_card.setVisible(has_project)
+        self.dashboard_total_value.setText(str(total))
+        self.dashboard_total_note.setText(str(self.selected_folder or "尚未选择项目"))
+        self.dashboard_ai_value.setText(f"{analyzed}/{total}" if total else "0")
+        self.dashboard_ai_note.setText("AI建议，仅供参考")
+        self.dashboard_manual_value.setText(str(human_confirmed))
+        self.dashboard_manual_note.setText(f"待复核 {needs_review} 张")
+        self.dashboard_group_value.setText(str(len(auto_group_ids)))
+        self.dashboard_group_note.setText("AI相似候选组，需人工确认")
+        self.dashboard_export_value.setText(str(export_ready))
+        self.dashboard_export_note.setText("按人工交付用途统计")
+        if hasattr(self, "next_step_label"):
+            if not has_project:
+                self.next_step_label.setText("请先建立一个选片项目。")
+                self.next_step_button.setText("新建选片项目")
+            elif analyzed <= 0:
+                self.next_step_label.setText("照片已导入。建议先运行 AI 分析，生成评分建议、业务类型和相似候选组。")
+                self.next_step_button.setText("开始 AI 分析")
+            elif human_confirmed <= 0:
+                self.next_step_label.setText("AI建议已生成。下一步进入审核与修正，由你确认最终工作流结果。")
+                self.next_step_button.setText("进入审核与修正")
+            else:
+                self.next_step_label.setText("已有人工确认结果。可以生成导出计划并安全复制整理结果。")
+                self.next_step_button.setText("导出与整理")
+        if hasattr(self, "project_empty_state_label"):
+            if total:
+                self.project_empty_state_label.setText(f"当前项目已导入 {total} 张照片。下一步建议：运行 AI 分析或进入审核与修正。")
+            else:
+                self.project_empty_state_label.setText("尚未导入照片。建议先选择照片文件夹，再运行 AI 分析，最后进入人工审核。")
+        if hasattr(self, "review_empty_state_card"):
+            self.review_empty_state_card.setVisible(total == 0)
+        if hasattr(self, "review_stack"):
+            self.review_stack.setVisible(total > 0)
+        if hasattr(self, "ai_empty_state_card"):
+            self.ai_empty_state_card.setVisible(analyzed == 0)
+        if hasattr(self, "ai_action_group"):
+            self.ai_action_group.setVisible(analyzed > 0)
+        if hasattr(self, "ai_overview_group"):
+            self.ai_overview_group.setVisible(analyzed > 0)
+        if hasattr(self, "export_empty_state_card"):
+            self.export_empty_state_card.setVisible(human_confirmed == 0)
+        if hasattr(self, "export_controls_widget"):
+            self.export_controls_widget.setVisible(human_confirmed > 0)
+        if hasattr(self, "export_safety_group"):
+            self.export_safety_group.setVisible(human_confirmed > 0)
 
     def _build_sidebar_navigation(self) -> QWidget:
         sidebar = QFrame()
@@ -1040,8 +1264,23 @@ class MainWindow(QMainWindow):
         self.review_context_label.setObjectName("WorkflowContext")
         self.review_context_label.setWordWrap(True)
         self.workflow_context_labels["review"] = self.review_context_label
+        self.review_empty_state_card, review_empty_layout = self._make_card("暂无可审核照片", "EmptyStateCard")
+        review_empty_body = QLabel("请先导入照片，或检查当前筛选条件。导入后这里会显示照片列表、大图预览和人工审核面板。")
+        review_empty_body.setObjectName("EmptyStateBody")
+        review_empty_body.setWordWrap(True)
+        self.review_empty_project_button = self._make_button("返回项目中心", "回到导入与设置页面。")
+        self.review_empty_project_button.setObjectName("SecondaryButton")
+        self.review_empty_import_button = self._make_button("导入照片", "选择照片文件夹。")
+        self.review_empty_import_button.setObjectName("PrimaryButton")
+        review_empty_buttons = QHBoxLayout()
+        review_empty_buttons.addWidget(self.review_empty_import_button)
+        review_empty_buttons.addWidget(self.review_empty_project_button)
+        review_empty_buttons.addStretch(1)
+        review_empty_layout.addWidget(review_empty_body)
+        review_empty_layout.addLayout(review_empty_buttons)
         layout.addLayout(header)
         layout.addWidget(self.review_context_label)
+        layout.addWidget(self.review_empty_state_card)
 
         self.review_stack = QStackedWidget()
         self.review_stack.setObjectName("ReviewCorrectionStack")
@@ -1147,7 +1386,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        filter_bar = QHBoxLayout()
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(FILTERS)
         self.sort_combo = QComboBox()
@@ -1160,18 +1398,39 @@ class MainWindow(QMainWindow):
         self.thumb_mode_combo = QComboBox()
         self.thumb_mode_combo.addItems(["contain", "cover"])
         self.thumb_mode_combo.setCurrentText(self.config.thumbnail_mode)
-        filter_bar.addWidget(QLabel("筛选"))
-        filter_bar.addWidget(self.filter_combo)
-        filter_bar.addWidget(QLabel("排序"))
-        filter_bar.addWidget(self.sort_combo)
-        filter_bar.addWidget(QLabel("视图"))
-        filter_bar.addWidget(self.view_combo)
-        filter_bar.addWidget(QLabel("缩略图"))
-        filter_bar.addWidget(self.thumb_size_combo)
-        filter_bar.addWidget(QLabel("显示"))
-        filter_bar.addWidget(self.thumb_mode_combo)
-        filter_bar.addStretch(1)
-        layout.addLayout(filter_bar)
+
+        filter_cards = QHBoxLayout()
+        filter_cards.setSpacing(12)
+        manual_filter_card, manual_filter_layout = self._make_card("人工状态筛选", "ActionCard")
+        manual_filter_hint = QLabel("人工确认、待复核、重复和交付状态")
+        manual_filter_hint.setObjectName("MetricNote")
+        manual_filter_hint.setWordWrap(True)
+        manual_filter_layout.addWidget(manual_filter_hint)
+        manual_filter_layout.addWidget(self.filter_combo)
+
+        ai_filter_card, ai_filter_layout = self._make_card("AI建议筛选", "ActionCard")
+        ai_filter_hint = QLabel("AI低置信度、AI相似候选组和业务类型建议")
+        ai_filter_hint.setObjectName("MetricNote")
+        ai_filter_hint.setWordWrap(True)
+        ai_filter_layout.addWidget(ai_filter_hint)
+        ai_filter_layout.addWidget(self.sort_combo)
+
+        view_filter_card, view_filter_layout = self._make_card("视图与缩略图", "ActionCard")
+        view_filter_hint = QLabel("切换审片视图、缩略图大小和显示方式")
+        view_filter_hint.setObjectName("MetricNote")
+        view_filter_hint.setWordWrap(True)
+        thumb_row = QHBoxLayout()
+        thumb_row.setSpacing(8)
+        thumb_row.addWidget(self.view_combo)
+        thumb_row.addWidget(self.thumb_size_combo)
+        thumb_row.addWidget(self.thumb_mode_combo)
+        view_filter_layout.addWidget(view_filter_hint)
+        view_filter_layout.addLayout(thumb_row)
+
+        for card in [manual_filter_card, ai_filter_card, view_filter_card]:
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+            filter_cards.addWidget(card)
+        layout.addLayout(filter_cards)
 
         progress_bar = QHBoxLayout()
         self.work_progress = QProgressBar()
@@ -1311,13 +1570,14 @@ class MainWindow(QMainWindow):
         self.folder_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
         self.select_folder_button = self._make_button("选择照片文件夹", "第一步：选择一个本地照片文件夹，后台导入并生成缩略图缓存。原图不会被删除。")
+        self.project_wizard_button = self._make_button("新建项目向导", "按摄影工作流引导创建项目：选择文件夹、确认业务类型、进入 AI 分析。")
         self.save_button = self._make_button("保存项目", "保存当前筛片结果、配置和项目状态。快捷键 Ctrl+S。")
         self.restore_project_button = self._make_button("恢复上次项目", "恢复上次筛片项目，包括筛选条件、当前照片和缩略图设置。")
         self.workflow_guide_button = self._make_button("工作流向导", "查看推荐流程、当前完成度、样本数量和下一步建议。")
         self.cancel_import_button = self._make_button("取消导入", "安全取消正在进行的导入任务，已完成部分会保留。")
         project_tab = self._tab_with_rows(
             [
-                [self.select_folder_button, self.save_button, self.restore_project_button, self.workflow_guide_button, self.cancel_import_button],
+                [self.project_wizard_button, self.select_folder_button, self.save_button, self.restore_project_button, self.workflow_guide_button, self.cancel_import_button],
                 [QLabel("当前项目"), self.folder_label],
             ]
         )
@@ -2034,6 +2294,11 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.select_folder_button.clicked.connect(self.select_folder)
+        self.project_wizard_button.clicked.connect(self.show_project_setup_wizard)
+        self.hero_new_project_button.clicked.connect(self.select_folder)
+        self.hero_open_project_button.clicked.connect(self.select_folder)
+        self.hero_continue_project_button.clicked.connect(self.restore_last_project_ui)
+        self.next_step_button.clicked.connect(self.run_project_next_step)
         self.save_button.clicked.connect(lambda: self.save_all(auto=False))
         self.restore_project_button.clicked.connect(self.restore_last_project_ui)
         self.workflow_guide_button.clicked.connect(self.show_workflow_guide)
@@ -2042,6 +2307,8 @@ class MainWindow(QMainWindow):
         self.reanalyze_current_suggestion_button.clicked.connect(self.start_current_ai)
         self.ai_analyze_button.clicked.connect(self.start_batch_ai)
         self.model_auto_group_button.clicked.connect(self.start_model_auto_group_ui)
+        self.ai_empty_start_button.clicked.connect(self.start_batch_ai)
+        self.ai_empty_group_button.clicked.connect(self.start_model_auto_group_ui)
         self.reanalyze_unconfirmed_button.clicked.connect(self.reanalyze_unconfirmed_photos)
         self.clear_stale_ai_button.clicked.connect(self.clear_stale_ai_suggestions)
         self.cancel_ai_button.clicked.connect(self.cancel_ai)
@@ -2053,6 +2320,7 @@ class MainWindow(QMainWindow):
         self.choose_export_path_button.clicked.connect(self.choose_export_path)
         self.open_export_folder_button.clicked.connect(self.open_export_folder)
         self.open_report_button.clicked.connect(self.open_report_file)
+        self.export_empty_review_button.clicked.connect(lambda: self._activate_workflow_section("review"))
         self.export_mode_combo.currentTextChanged.connect(lambda _text: self.update_export_stats())
         for checkbox in [
             self.export_use_dirs_checkbox,
@@ -2122,6 +2390,8 @@ class MainWindow(QMainWindow):
         self.similar_group_panel.request_run_similarity_task.connect(self.calculate_similarity_groups_ui)
         self.similar_group_panel.group_status_changed.connect(self.on_similar_group_status_changed)
         self.similar_group_panel.request_open_photo.connect(self.select_source_index)
+        self.review_empty_project_button.clicked.connect(lambda: self._activate_workflow_section("project"))
+        self.review_empty_import_button.clicked.connect(self.select_folder)
         self.recommended_keep_button.clicked.connect(self.set_recommended_keep)
         self.group_backup_quick_button.clicked.connect(lambda: self.set_current_group_status("backup"))
         self.group_duplicate_quick_button.clicked.connect(lambda: self.set_current_group_status("duplicate"))
@@ -2231,6 +2501,65 @@ class MainWindow(QMainWindow):
                 color: #dbeafe;
                 padding: 8px;
             }
+            QFrame#DashboardCard, QFrame#MetricCard, QFrame#HeroCard, QFrame#ActionCard,
+            QFrame#EmptyStateCard, QFrame#SafetyNoticeCard,
+            QGroupBox#WorkflowCard {
+                background: #20262f;
+                border: 1px solid #303744;
+                border-radius: 10px;
+            }
+            QFrame#HeroCard {
+                background: #172033;
+                border-color: #3b82f6;
+            }
+            QFrame#ActionCard {
+                background: #202936;
+            }
+            QFrame#SafetyNoticeCard {
+                background: #2a2417;
+                border-color: #a16207;
+            }
+            QFrame#EmptyStateCard {
+                background: #1e2632;
+                border-color: #475569;
+            }
+            QLabel#HeroTitle {
+                color: #ffffff;
+                font-size: 30px;
+                font-weight: 900;
+            }
+            QLabel#HeroSubtitle {
+                color: #dbeafe;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QLabel#CardTitle {
+                color: #f8fafc;
+                font-weight: 800;
+                font-size: 15px;
+            }
+            QLabel#MetricValue {
+                color: #ffffff;
+                font-size: 26px;
+                font-weight: 900;
+            }
+            QLabel#MetricNote {
+                color: #b6c2d2;
+                font-size: 12px;
+            }
+            QLabel#EmptyStateBody {
+                color: #dbeafe;
+                font-size: 14px;
+                line-height: 1.35;
+            }
+            QLabel#EmptyStateAction {
+                color: #facc15;
+                font-weight: 700;
+            }
+            QLabel#SafetyNoticeText {
+                color: #fde68a;
+                font-weight: 700;
+            }
             QFrame#SidebarNavigation {
                 background: #20262f;
                 border: 1px solid #303744;
@@ -2339,6 +2668,26 @@ class MainWindow(QMainWindow):
             }
             QPushButton:hover { background: #3b4656; }
             QPushButton:disabled { background: #252b34; color: #707987; border-color: #333b47; }
+            QPushButton#PrimaryButton {
+                background: #2563eb;
+                border-color: #60a5fa;
+                color: #ffffff;
+                font-weight: 800;
+            }
+            QPushButton#PrimaryButton:hover { background: #1d4ed8; }
+            QPushButton#SecondaryButton {
+                background: #263241;
+                border-color: #4b5563;
+                color: #e5e7eb;
+                font-weight: 700;
+            }
+            QPushButton#SecondaryButton:hover { background: #334155; }
+            QPushButton#DangerButton {
+                background: #3b2227;
+                border-color: #b45309;
+                color: #fed7aa;
+                font-weight: 700;
+            }
             QPushButton#ActiveMark { background: #2563eb; border-color: #60a5fa; font-weight: 700; }
             QPushButton#QuickAction { background: #263241; border-color: #4b5563; font-weight: 700; }
             QProgressBar { background: #151922; border: 1px solid #3a4351; border-radius: 6px; height: 18px; text-align: center; }
@@ -2535,6 +2884,51 @@ class MainWindow(QMainWindow):
             "- 不会自动爬取网络照片；素材库只扫描你手动选择的本地文件夹。",
         ]
         QMessageBox.information(self, "工作流向导", "\n".join(lines))
+
+    def show_project_setup_wizard(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("项目建立向导")
+        dialog.setMinimumWidth(560)
+        layout = QVBoxLayout(dialog)
+        title = QLabel("建立一个新的摄影筛片项目")
+        title.setObjectName("WorkflowPageTitle")
+        title.setWordWrap(True)
+        body = QLabel(
+            "1. 选择本地照片文件夹，软件只读取和复制，不删除原图。\n"
+            "2. 选择基础业务风格和处理目标，帮助 AI 给出更稳妥的建议。\n"
+            "3. 运行 AI 分析和 AI 相似候选组，再由你人工确认最终结果。"
+        )
+        body.setWordWrap(True)
+        body.setObjectName("WorkflowPageHint")
+        layout.addWidget(title)
+        layout.addWidget(body)
+        row = QHBoxLayout()
+        choose_button = self._make_button("选择照片文件夹", "关闭向导并选择项目照片文件夹。")
+        restore_button = self._make_button("恢复上次项目", "关闭向导并尝试恢复上次项目。")
+        close_button = self._make_button("稍后再说", "关闭向导。")
+        row.addWidget(choose_button)
+        row.addWidget(restore_button)
+        row.addStretch(1)
+        row.addWidget(close_button)
+        layout.addLayout(row)
+        choose_button.clicked.connect(lambda: (dialog.accept(), self.select_folder()))
+        restore_button.clicked.connect(lambda: (dialog.accept(), self.restore_last_project_ui()))
+        close_button.clicked.connect(dialog.reject)
+        dialog.exec()
+
+    def run_project_next_step(self) -> None:
+        if not self.items:
+            self.select_folder()
+            return
+        analyzed = sum(1 for item in self.items if item.ai_suggestion or item.ai_primary_category or item.ai_confidence)
+        human_confirmed = sum(1 for item in self.items if item.review_status == REVIEW_STATUS_HUMAN_CONFIRMED)
+        if analyzed <= 0:
+            self._activate_workflow_section("ai")
+            return
+        if human_confirmed <= 0:
+            self._activate_workflow_section("review")
+            return
+        self._activate_workflow_section("export")
 
     @Slot()
     def select_folder(self) -> None:
